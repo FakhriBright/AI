@@ -1,0 +1,50 @@
+# Phase 1 skeleton — service boundaries only.
+# Dockerfiles for backend/frontend are added in Phase 2/8 respectively.
+# The MT5 Bridge is NOT a service here: it runs natively on the Windows host,
+# outside Docker, per the dev architecture decision. The backend reaches it at
+# MT5_BRIDGE_URL (see .env.example) — typically host.docker.internal on
+# Docker Desktop for Windows.
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  backend:
+    build:
+      context: ./backend   # Dockerfile added Phase 2
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      - postgres
+    ports:
+      - "8000:8000"
+    # extra_hosts is needed on Linux hosts for host.docker.internal to resolve;
+    # Docker Desktop for Windows/Mac provides it automatically.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  frontend:
+    build:
+      context: ./frontend  # Dockerfile added Phase 8
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      - backend
+    ports:
+      - "5173:5173"
+
+volumes:
+  postgres_data:
+
+# Phase 10 adds an nginx service + HTTPS-terminating overlay compose file for
+# production; not present here to avoid optimizing prematurely for a target
+# that isn't decided yet, while keeping this file valid for both environments.
