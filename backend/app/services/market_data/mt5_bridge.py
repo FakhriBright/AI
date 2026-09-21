@@ -10,6 +10,7 @@ that package only exists in the bridge process, on the Windows host.
 import httpx
 
 from app.services.market_data.base import (
+    AccountInfo,
     BridgeHealth,
     Candle,
     MarketDataProvider,
@@ -63,6 +64,10 @@ class MT5BridgeProvider(MarketDataProvider):
     async def list_symbols(self) -> list[str]:
         data = await self._get("/symbols")
         return data["symbols"]
+
+    async def account_info(self) -> AccountInfo:
+        data = await self._get("/account")
+        return AccountInfo(**data)
 
     async def symbol_info(self, symbol: str) -> SymbolInfo:
         data = await self._get(f"/symbols/{symbol}/info")

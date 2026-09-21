@@ -24,6 +24,8 @@ class SymbolInfo(BaseModel):
     symbol: str
     digits: int
     point: float
+    tick_size: float
+    tick_value: float
     contract_size: float
     volume_min: float
     volume_step: float
@@ -38,6 +40,17 @@ class Tick(BaseModel):
     time_utc: datetime
     bid: float
     ask: float
+
+
+class AccountInfo(BaseModel):
+    login: int
+    server: str
+    currency: str
+    balance: float
+    equity: float
+    margin: float
+    free_margin: float
+    leverage: int
 
 
 class BridgeHealth(BaseModel):
@@ -70,6 +83,9 @@ class MarketDataProvider(ABC):
 
     @abstractmethod
     async def symbol_info(self, symbol: str) -> SymbolInfo: ...
+
+    @abstractmethod
+    async def account_info(self) -> AccountInfo: ...
 
     @abstractmethod
     async def list_timeframes(self) -> list[str]: ...

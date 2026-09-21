@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import auth, health
+from app.api.routes import analysis, auth, health, market
 from app.core.config import settings
 
 app = FastAPI(
@@ -23,6 +23,8 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(auth.router)
+app.include_router(market.router)
+app.include_router(analysis.router)
 
 # Technical / fundamental / risk / AI analysis routers are added in their
 # owning phases (3-7) — deliberately not stubbed here yet.
