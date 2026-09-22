@@ -29,20 +29,18 @@ class GeminiAIProvider:
             + context["analysis_prompt"]
         )
 
-        interaction = await self.client.aio.interactions.create(
+        response = await self.client.aio.models.generate_content(
             model=self.model,
-            input=prompt,
+            contents=prompt,
         )
 
-        analysis = interaction.output_text or ""
+        analysis = response.text or ""
 
         return AIResponse(
             provider="gemini",
             model=self.model,
             analysis=analysis,
             raw={
-                "id": interaction.id,
                 "model": self.model,
-                "status": interaction.status,
             },
         )
