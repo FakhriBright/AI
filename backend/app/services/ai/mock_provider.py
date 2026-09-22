@@ -4,6 +4,9 @@ from app.services.ai.base import AIResponse
 
 
 class MockAIProvider:
+    def __init__(self, provider: str = "gemini", model: str = "gemini-3.6-flash"):
+        self.provider = provider
+        self.model = model
 
     async def analyze(
         self,
@@ -37,8 +40,8 @@ class MockAIProvider:
         )
 
         return AIResponse(
-            provider="mock",
-            model="mock-reasoning-v1",
+            provider=self.provider,
+            model=self.model,
             analysis=analysis,
             raw={
                 "source": "mock",

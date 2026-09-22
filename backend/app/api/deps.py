@@ -36,3 +36,24 @@ def get_current_user(
         raise credentials_error
 
     return user
+
+
+oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="/auth/login", auto_error=False)
+
+
+def get_optional_current_user(
+    token: str | None = Depends(oauth2_scheme_optional),
+    db: Session = Depends(get_db),
+) -> User | None:
+    if not token:
+        return None
+    try:
+        user_id_str = decode_access_token(token)
+        user_id = uuid.UUID(user_id_str)
+        user = db.get(User, user_id)
+        if user and user.is_active:
+            return user
+    except Exception:
+        pass
+    return None
+

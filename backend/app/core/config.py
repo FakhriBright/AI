@@ -19,9 +19,8 @@ class Settings(BaseSettings):
     mt5_bridge_url: str = "http://host.docker.internal:8765"
     mt5_bridge_timeout_seconds: float = 10.0
 
-    # AI provider abstraction (PRD §15) — not wired to a concrete
-    # implementation yet (Phase 6). Present here so the boundary exists.
-    ai_provider: str = "anthropic"
+    # AI provider abstraction (PRD §15) — value selects the concrete implementation.
+    ai_provider: str = "gemini"
     ai_api_key: str = ""
 
     # Auth

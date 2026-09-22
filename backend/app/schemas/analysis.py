@@ -27,3 +27,23 @@ class AnalysisResponse(BaseModel):
     trade_plan: dict[str, Any]
 
     ai: AIAnalysisResponse
+
+
+class ChatMessage(BaseModel):
+    role: str  # "user", "assistant", or "system"
+    content: str
+
+
+class AnalysisChatRequest(BaseModel):
+    symbol: str
+    message: str
+    history: list[ChatMessage] = []
+    analysis_context: dict[str, Any] | None = None
+
+
+class AnalysisChatResponse(BaseModel):
+    symbol: str
+    reply: str
+    provider: str
+    model: str
+
