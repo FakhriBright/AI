@@ -9,19 +9,13 @@ export function getApiBaseUrl() {
     return customUrl.trim().replace(/\/+$/, '')
   }
 
+  const envUrl = import.meta.env.VITE_API_URL || import.meta.env.VITE_API_BASE_URL
+  if (envUrl && envUrl.trim()) {
+    return envUrl.trim().replace(/\/+$/, '')
+  }
+
   const protocol = window.location.protocol || 'http:'
   const hostname = window.location.hostname || 'localhost'
-
-  const envUrl = import.meta.env.VITE_API_BASE_URL
-  if (envUrl && envUrl.trim()) {
-    const cleanedEnvUrl = envUrl.trim().replace(/\/+$/, '')
-    const envIsLocal = cleanedEnvUrl.includes('localhost') || cleanedEnvUrl.includes('127.0.0.1')
-    const pageIsLocal = hostname === 'localhost' || hostname === '127.0.0.1'
-
-    if (!envIsLocal || pageIsLocal) {
-      return cleanedEnvUrl
-    }
-  }
 
   return `${protocol}//${hostname}:8000`
 }

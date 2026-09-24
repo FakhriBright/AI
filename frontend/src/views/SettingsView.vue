@@ -29,11 +29,11 @@ function handleSaveUrl() {
 }
 
 function handleResetUrl() {
+  setApiBaseUrl(null)
   const protocol = window.location.protocol || 'http:'
   const hostname = window.location.hostname || 'localhost'
-  const defaultUrl = `${protocol}//${hostname}:8000`
-  apiUrlInput.value = defaultUrl
-  setApiBaseUrl(defaultUrl)
+  const envUrl = import.meta.env.VITE_API_URL || import.meta.env.VITE_API_BASE_URL
+  apiUrlInput.value = envUrl || `${protocol}//${hostname}:8000`
   savedSuccess.value = true
   setTimeout(() => {
     savedSuccess.value = false

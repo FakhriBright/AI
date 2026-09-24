@@ -805,3 +805,228 @@ details.details-accordion[open] summary {
   border-bottom: 1px solid var(--border-main);
   background: #fafafa;
 }
+
+/* ==========================================================================
+   AI TRADE — MINIMALIST CENTERED LOGIN PAGE (MATCHING USER REFERENCE DESIGN)
+   ========================================================================== */
+
+.simple-login-page {
+  position: relative;
+  width: 100vw;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background-color: #f1f5f9;
+  background-image: 
+    radial-gradient(circle at 50% 20%, rgba(204, 251, 241, 0.6) 0%, transparent 50%),
+    radial-gradient(circle at 80% 80%, rgba(224, 242, 254, 0.5) 0%, transparent 45%);
+  padding: 24px;
+  font-family: var(--font-sans);
+}
+
+.simple-login-header {
+  position: absolute;
+  top: 32px;
+  left: 36px;
+}
+
+.brand-logo-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand-logo-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: var(--text-main);
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 10px rgba(15, 23, 42, 0.15);
+}
+
+.brand-logo-title {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-main);
+}
+
+/* CENTERED FLOATING CARD */
+.simple-login-card {
+  width: 100%;
+  max-width: 430px;
+  background: #ffffff;
+  border: 1px solid rgba(226, 232, 240, 0.8);
+  border-radius: 24px;
+  padding: 44px 36px 36px 36px;
+  box-shadow: 
+    0 20px 40px -15px rgba(15, 23, 42, 0.07),
+    0 0 1px rgba(15, 23, 42, 0.1);
+  text-align: center;
+  position: relative;
+  z-index: 2;
+}
+
+.card-icon-badge {
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 20px auto;
+  color: var(--text-main);
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.04);
+}
+
+.card-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-main);
+  margin-bottom: 8px;
+  letter-spacing: -0.01em;
+}
+
+.card-subtitle {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  margin-bottom: 28px;
+  padding: 0 8px;
+}
+
+.simple-login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.simple-input-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.simple-input-icon {
+  position: absolute;
+  left: 14px;
+  color: #94a3b8;
+  display: flex;
+  align-items: center;
+  pointer-events: none;
+}
+
+.simple-input {
+  width: 100%;
+  height: 48px;
+  padding: 0 16px 0 46px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  font-size: 14px;
+  color: var(--text-main);
+  outline: none;
+  transition: all 0.2s ease;
+}
+
+.simple-input:focus {
+  background: #ffffff;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
+}
+
+.simple-input::placeholder {
+  color: #94a3b8;
+}
+
+.input-with-toggle {
+  padding-right: 44px;
+}
+
+.simple-toggle-btn {
+  position: absolute;
+  right: 12px;
+  background: none;
+  border: none;
+  color: #94a3b8;
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  transition: color 0.2s ease;
+}
+
+.simple-toggle-btn:hover {
+  color: var(--text-main);
+}
+
+.simple-alert-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 10px;
+  color: #dc2626;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.simple-submit-btn {
+  width: 100%;
+  height: 48px;
+  margin-top: 8px;
+  background: #0f172a;
+  border: none;
+  border-radius: 12px;
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.15);
+}
+
+.simple-submit-btn:hover:not(:disabled) {
+  background: #1e293b;
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.22);
+  transform: translateY(-1px);
+}
+
+.simple-submit-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.simple-submit-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.card-footer-note {
+  margin-top: 24px;
+  font-size: 11px;
+}
+
+@media (max-width: 520px) {
+  .simple-login-header {
+    top: 20px;
+    left: 20px;
+  }
+  .simple-login-card {
+    padding: 32px 24px 28px 24px;
+    border-radius: 20px;
+  }
+}

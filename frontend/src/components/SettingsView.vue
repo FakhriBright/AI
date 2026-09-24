@@ -30,9 +30,11 @@ function handleSaveUrl() {
 }
 
 function handleResetUrl() {
-  const defaultUrl = 'http://172.16.204.27:8000'
-  apiUrlInput.value = defaultUrl
-  setApiBaseUrl(defaultUrl)
+  setApiBaseUrl(null)
+  const protocol = window.location.protocol || 'http:'
+  const hostname = window.location.hostname || 'localhost'
+  const envUrl = import.meta.env.VITE_API_URL || import.meta.env.VITE_API_BASE_URL
+  apiUrlInput.value = envUrl || `${protocol}//${hostname}:8000`
   savedSuccess.value = true
   setTimeout(() => {
     savedSuccess.value = false
@@ -127,7 +129,7 @@ onMounted(() => {
               v-model="apiUrlInput"
               type="text"
               class="terminal-input"
-              placeholder="http://172.16.204.27:8000"
+              placeholder="http://localhost:8000"
             />
             <button class="btn-primary" @click="handleSaveUrl">
               Save URL

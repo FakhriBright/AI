@@ -12,10 +12,9 @@ import {
 import NavigationSidebar from './components/NavigationSidebar.vue'
 import TopBar from './components/TopBar.vue'
 import AIChatAssistant from './components/AIChatAssistant.vue'
+import LoginView from './components/LoginView.vue'
 
 // Auth State
-const email = ref('')
-const password = ref('')
 const loginLoading = ref(false)
 const loginError = ref('')
 const loggedIn = ref(Boolean(getStoredToken()))
@@ -34,12 +33,15 @@ const isBridgeOffline = computed(() => {
 
 let refreshTimer = null
 
-async function handleLogin() {
+async function handleLogin(credentials) {
   loginError.value = ''
   loginLoading.value = true
 
+  const userEmail = credentials?.email || ''
+  const userPassword = credentials?.password || ''
+
   try {
-    const data = await login(email.value, password.value)
+    const data = await login(userEmail, userPassword)
     if (data?.access_token) {
       loggedIn.value = true
       initTerminal()
@@ -155,47 +157,12 @@ watch(loggedIn, (isAuth) => {
 
 <template>
   <!-- 1. LOGIN VIEW -->
-  <div v-if="!loggedIn" class="login-page">
-    <div class="login-card">
-      <div class="login-header">
-        <span class="brand-logo-txt">QUANTTERMINAL</span>
-        <h1>Operator Sign In</h1>
-        <p class="subtitle">Authenticate to access live market analysis decision support.</p>
-      </div>
-
-      <form @submit.prevent="handleLogin">
-        <label>
-          Email Address
-          <input
-            v-model="email"
-            type="email"
-            autocomplete="email"
-            placeholder="trader@example.com"
-            required
-          />
-        </label>
-
-        <label>
-          Password
-          <input
-            v-model="password"
-            type="password"
-            autocomplete="current-password"
-            placeholder="Enter password"
-            required
-          />
-        </label>
-
-        <div v-if="loginError" class="login-error-alert">
-          <span>{{ loginError }}</span>
-        </div>
-
-        <button type="submit" class="login-submit-btn" :disabled="loginLoading">
-          <span>{{ loginLoading ? 'Authenticating...' : 'Sign In' }}</span>
-        </button>
-      </form>
-    </div>
-  </div>
+  <LoginView
+    v-if="!loggedIn"
+    :loading="loginLoading"
+    :error="loginError"
+    @login="handleLogin"
+  />
 
   <!-- 2. QUANTTERMINAL APPLICATION SHELL (3-COLUMN SPA WITH ROUTER) -->
   <div v-else class="app-shell">
