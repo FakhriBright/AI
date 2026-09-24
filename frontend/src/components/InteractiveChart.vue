@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { getMarketCandles } from '../services/api'
 import { formatPrice, formatDateTimeUtc } from '../utils/formatters'
 
@@ -81,7 +81,7 @@ function renderChart() {
   const container = chartContainerRef.value
   const dpr = window.devicePixelRatio || 1
   const width = container ? container.clientWidth : 800
-  const height = 500
+  const height = 440
 
   canvas.width = width * dpr
   canvas.height = height * dpr
@@ -90,8 +90,8 @@ function renderChart() {
 
   ctx.scale(dpr, dpr)
 
-  // Clear background
-  ctx.fillStyle = '#0f172a'
+  // Clean white surface
+  ctx.fillStyle = '#ffffff'
   ctx.fillRect(0, 0, width, height)
 
   const candleList = candles.value
@@ -100,7 +100,7 @@ function renderChart() {
     ctx.font = '13px sans-serif'
     ctx.textAlign = 'center'
     ctx.fillText(
-      isLoading.value ? 'Loading MT5 market candles...' : (error.value || 'No candle data available'),
+      isLoading.value ? 'Loading market candles...' : (error.value || 'No candle data available'),
       width / 2,
       height / 2
     )
@@ -122,7 +122,6 @@ function renderChart() {
     if (c.tick_volume > maxVol) maxVol = c.tick_volume
   }
 
-  // Include scenario trigger and invalidation in price bounds if near
   const triggerRef = props.selectedScenario?.trigger_reference
   const invalidationRef = props.selectedScenario?.invalidation_reference
   if (triggerRef && Math.abs(triggerRef - minPrice) / (maxPrice - minPrice || 1) < 2) {
@@ -147,8 +146,8 @@ function renderChart() {
   // Horizontal Grid & Price Axis
   const gridSteps = 5
   ctx.lineWidth = 1
-  ctx.strokeStyle = '#1e293b'
-  ctx.fillStyle = '#64748b'
+  ctx.strokeStyle = '#e2e8f0'
+  ctx.fillStyle = '#475569'
   ctx.font = '10px monospace'
   ctx.textAlign = 'left'
 
@@ -194,11 +193,11 @@ function renderChart() {
     }
   }
 
-  // Scenario Trigger Line (Cyan)
+  // Scenario Trigger Line
   if (triggerRef) {
     const y = getY(triggerRef)
     if (y >= padding.top && y <= height - padding.bottom) {
-      ctx.strokeStyle = '#06b6d4'
+      ctx.strokeStyle = '#0f766e'
       ctx.lineWidth = 1.5
       ctx.setLineDash([6, 3])
       ctx.beginPath()
@@ -206,12 +205,12 @@ function renderChart() {
       ctx.lineTo(width - padding.right, y)
       ctx.stroke()
 
-      ctx.fillStyle = '#06b6d4'
+      ctx.fillStyle = '#0f766e'
       ctx.fillText('TRIGGER', width - padding.right + 8, y - 4)
     }
   }
 
-  // Scenario Invalidation Line (Amber)
+  // Scenario Invalidation Line
   if (invalidationRef) {
     const y = getY(invalidationRef)
     if (y >= padding.top && y <= height - padding.bottom) {
@@ -230,7 +229,7 @@ function renderChart() {
 
   ctx.setLineDash([]) // reset
 
-  // Candlestick rendering
+  // Candlesticks rendering
   const count = candleList.length
   const candleSpacing = chartWidth / count
   const candleWidth = Math.max(2, candleSpacing * 0.7)
@@ -249,8 +248,8 @@ function renderChart() {
 
     // Volume bars at bottom
     if (maxVol > 0) {
-      const volHeight = (c.tick_volume / maxVol) * 45
-      ctx.fillStyle = isBullish ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)'
+      const volHeight = (c.tick_volume / maxVol) * 40
+      ctx.fillStyle = isBullish ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)'
       ctx.fillRect(x - candleWidth / 2, height - padding.bottom - volHeight, candleWidth, volHeight)
     }
 
@@ -275,24 +274,21 @@ function renderChart() {
     ctx.setLineDash([2, 2])
     ctx.lineWidth = 1
 
-    // Vertical line
     ctx.beginPath()
     ctx.moveTo(mousePos.value.x, padding.top)
     ctx.lineTo(mousePos.value.x, height - padding.bottom)
     ctx.stroke()
 
-    // Horizontal line
     if (mousePos.value.y >= padding.top && mousePos.value.y <= height - padding.bottom) {
       ctx.beginPath()
       ctx.moveTo(padding.left, mousePos.value.y)
       ctx.lineTo(width - padding.right, mousePos.value.y)
       ctx.stroke()
 
-      // Price Tag on axis
       const hoveredPrice = chartMin + ((height - padding.bottom - mousePos.value.y) / chartHeight) * adjustedRange
-      ctx.fillStyle = '#334155'
+      ctx.fillStyle = '#0f172a'
       ctx.fillRect(width - padding.right + 2, mousePos.value.y - 8, 60, 16)
-      ctx.fillStyle = '#f8fafc'
+      ctx.fillStyle = '#ffffff'
       ctx.font = '10px monospace'
       ctx.fillText(formatPrice(hoveredPrice, props.symbol), width - padding.right + 5, mousePos.value.y + 4)
     }
@@ -346,58 +342,45 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="panel-container">
-    <div class="panel-header">
-      <div class="panel-title-wrap">
-        <svg class="panel-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-          <path d="M5 9.2h3V19H5zM10.6 5h2.8v14h-2.8zm5.6 8H19v6h-2.8z" />
-        </svg>
-        <h2 class="panel-title">INTERACTIVE TECHNICAL CHART</h2>
-        <span class="live-tag">LIVE MT5 FEED</span>
-      </div>
+  <div class="card-box chart-card">
+    <div class="chart-toolbar">
+      <span class="card-title">PRICE ACTION CHART</span>
 
-      <!-- Timeframe Buttons -->
-      <div class="chart-controls">
-        <div class="tf-btn-group">
-          <button
-            v-for="tf in timeframes"
-            :key="tf"
-            class="tf-tab-btn"
-            :class="{ active: activeTf === tf }"
-            @click="handleTimeframeChange(tf)"
-          >
-            {{ tf }}
-          </button>
-        </div>
+      <!-- Polished Segmented Control for Timeframe -->
+      <div class="segmented-control">
+        <button
+          v-for="tf in timeframes"
+          :key="tf"
+          class="segment-btn"
+          :class="{ active: activeTf === tf }"
+          @click="handleTimeframeChange(tf)"
+        >
+          {{ tf }}
+        </button>
       </div>
     </div>
 
-    <!-- Candle Hover Data Readout Header -->
-    <div class="candle-stat-bar">
+    <!-- OHLC Readout Bar -->
+    <div class="chart-readout-bar">
       <div v-if="hoveredCandle" class="stat-readout">
-        <span class="stat-item"><span class="stat-lbl">Time:</span> {{ formatDateTimeUtc(hoveredCandle.time_utc) }}</span>
-        <span class="stat-item"><span class="stat-lbl">O:</span> <span class="font-mono">{{ formatPrice(hoveredCandle.open, symbol) }}</span></span>
-        <span class="stat-item"><span class="stat-lbl">H:</span> <span class="font-mono">{{ formatPrice(hoveredCandle.high, symbol) }}</span></span>
-        <span class="stat-item"><span class="stat-lbl">L:</span> <span class="font-mono">{{ formatPrice(hoveredCandle.low, symbol) }}</span></span>
-        <span class="stat-item"><span class="stat-lbl">C:</span> <span class="font-mono" :class="hoveredCandle.close >= hoveredCandle.open ? 'text-green' : 'text-red'">{{ formatPrice(hoveredCandle.close, symbol) }}</span></span>
-        <span class="stat-item"><span class="stat-lbl">Vol:</span> {{ hoveredCandle.tick_volume }}</span>
-        <span class="stat-item"><span class="stat-lbl">Spread:</span> {{ hoveredCandle.spread ?? '—' }} pts</span>
+        <span>O: <strong class="font-mono">{{ formatPrice(hoveredCandle.open, symbol) }}</strong></span> &nbsp;
+        <span>H: <strong class="font-mono">{{ formatPrice(hoveredCandle.high, symbol) }}</strong></span> &nbsp;
+        <span>L: <strong class="font-mono">{{ formatPrice(hoveredCandle.low, symbol) }}</strong></span> &nbsp;
+        <span>C: <strong class="font-mono" :class="hoveredCandle.close >= hoveredCandle.open ? 'text-green' : 'text-red'">{{ formatPrice(hoveredCandle.close, symbol) }}</strong></span>
       </div>
-      <div v-else class="stat-readout text-muted">
-        <span>Hover over candles to view precise bar data (Open, High, Low, Close, Volume).</span>
+      <div v-else class="text-muted">
+        <span>Hover over candles to view bar data.</span>
       </div>
-      <div class="chart-legend-row">
-        <span class="legend-chip"><span class="chip-line chip-res"></span>Resistance</span>
-        <span class="legend-chip"><span class="chip-line chip-sup"></span>Support</span>
-        <span class="legend-chip"><span class="chip-line chip-trig"></span>Trigger</span>
-        <span class="legend-chip"><span class="chip-line chip-inv"></span>Inval</span>
+
+      <div class="text-muted text-xs">
+        <span>Timeframe: <strong>{{ activeTf }}</strong></span>
       </div>
     </div>
 
     <!-- Canvas Container -->
     <div
       ref="chartContainerRef"
-      class="canvas-wrap"
+      class="canvas-container"
       @mousemove="handleMouseMove"
       @mouseleave="handleMouseLeave"
     >

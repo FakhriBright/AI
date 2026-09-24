@@ -8,10 +8,12 @@ export function getApiBaseUrl() {
   if (customUrl && customUrl.trim()) {
     return customUrl.trim().replace(/\/+$/, '')
   }
-  return (
-    import.meta.env.VITE_API_BASE_URL ||
-    'http://172.16.204.27:8000'
-  ).replace(/\/+$/, '')
+  if (import.meta.env.VITE_API_BASE_URL) {
+    return import.meta.env.VITE_API_BASE_URL.replace(/\/+$/, '')
+  }
+  const protocol = window.location.protocol || 'http:'
+  const hostname = window.location.hostname || 'localhost'
+  return `${protocol}//${hostname}:8000`
 }
 
 export function setApiBaseUrl(url) {

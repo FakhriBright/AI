@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
 import {
   login,
   logout,
@@ -11,41 +11,27 @@ import {
 
 import NavigationSidebar from './components/NavigationSidebar.vue'
 import TopBar from './components/TopBar.vue'
-import MarketOverviewCards from './components/MarketOverviewCards.vue'
-import InteractiveChart from './components/InteractiveChart.vue'
-import MultiTimeframeGrid from './components/MultiTimeframeGrid.vue'
-import MarketStructurePanel from './components/MarketStructurePanel.vue'
-import KeyLevelsPanel from './components/KeyLevelsPanel.vue'
-import TradePlanPanel from './components/TradePlanPanel.vue'
-import AIReasoningPanel from './components/AIReasoningPanel.vue'
 import AIChatAssistant from './components/AIChatAssistant.vue'
-import SettingsView from './components/SettingsView.vue'
-import RiskSettingsView from './components/RiskSettingsView.vue'
 
-
-
-// Authentication State
+// Auth State
 const email = ref('')
 const password = ref('')
 const loginLoading = ref(false)
 const loginError = ref('')
 const loggedIn = ref(Boolean(getStoredToken()))
 
-
-// Active Views: 'dashboard', 'analysis', 'risk', 'settings'
-const currentView = ref('dashboard')
-
-// Terminal Data State
+// Data State
 const symbols = ref(['EURUSDm', 'XAUUSDm'])
 const selectedSymbol = ref('EURUSDm')
 const analysisData = ref(null)
 const isAnalysisLoading = ref(false)
 const analysisError = ref('')
 const bridgeHealth = ref({})
-const backendConnected = ref(true)
 
-// Auto-refresh interval (0 = off, 15 = 15s, etc.)
-const autoRefreshInterval = ref(30)
+const isBridgeOffline = computed(() => {
+  return bridgeHealth.value?.bridge_status !== 'ok' || bridgeHealth.value?.data_source_connected === false
+})
+
 let refreshTimer = null
 
 async function handleLogin() {
@@ -65,8 +51,6 @@ async function handleLogin() {
   }
 }
 
-
-
 function handleLogout() {
   logout()
   loggedIn.value = false
@@ -74,7 +58,6 @@ function handleLogout() {
   stopAutoRefresh()
 }
 
-// Global listener for expired tokens
 function onAuthExpired(event) {
   loginError.value = event.detail || 'Session expired. Please log in again.'
   handleLogout()
@@ -87,7 +70,7 @@ async function fetchSymbols() {
       symbols.value = res.symbols.slice()
     }
   } catch (err) {
-    console.warn('Could not load symbols list from backend:', err.message)
+    console.warn('Could not load symbols:', err.message)
   }
 }
 
@@ -95,10 +78,8 @@ async function checkBridgeHealth() {
   try {
     const res = await getMarketHealth()
     bridgeHealth.value = res || {}
-    backendConnected.value = true
   } catch (err) {
     bridgeHealth.value = { bridge_status: 'down', data_source_connected: false }
-    backendConnected.value = false
   }
 }
 
@@ -111,9 +92,8 @@ async function fetchAnalysis() {
   try {
     const data = await getAnalysis(selectedSymbol.value)
     analysisData.value = data
-    backendConnected.value = true
   } catch (err) {
-    analysisError.value = err.message || 'Failed to fetch market analysis'
+    analysisError.value = 'Unable to load market data.'
     if (err.message && err.message.toLowerCase().includes('session expired')) {
       handleLogout()
     }
@@ -128,21 +108,14 @@ function handleSelectSymbol(newSymbol) {
   fetchAnalysis()
 }
 
-function handleAutoRefreshChange(intervalSec) {
-  autoRefreshInterval.value = intervalSec
-  resetAutoRefresh()
-}
-
 function startAutoRefresh() {
   stopAutoRefresh()
-  if (autoRefreshInterval.value > 0) {
-    refreshTimer = setInterval(() => {
-      if (loggedIn.value && !isAnalysisLoading.value) {
-        fetchAnalysis()
-        checkBridgeHealth()
-      }
-    }, autoRefreshInterval.value * 1000)
-  }
+  refreshTimer = setInterval(() => {
+    if (loggedIn.value && !isAnalysisLoading.value) {
+      fetchAnalysis()
+      checkBridgeHealth()
+    }
+  }, 30000)
 }
 
 function stopAutoRefresh() {
@@ -150,11 +123,6 @@ function stopAutoRefresh() {
     clearInterval(refreshTimer)
     refreshTimer = null
   }
-}
-
-function resetAutoRefresh() {
-  stopAutoRefresh()
-  startAutoRefresh()
 }
 
 async function initTerminal() {
@@ -186,22 +154,18 @@ watch(loggedIn, (isAuth) => {
 </script>
 
 <template>
-  <!-- 1. LOGIN SCREEN -->
+  <!-- 1. LOGIN VIEW -->
   <div v-if="!loggedIn" class="login-page">
     <div class="login-card">
-      <div class="brand-mark-glow">
-        <span class="brand-logo-txt">AI</span>
+      <div class="login-header">
+        <span class="brand-logo-txt">QUANTTERMINAL</span>
+        <h1>Operator Sign In</h1>
+        <p class="subtitle">Authenticate to access live market analysis decision support.</p>
       </div>
-
-      <p class="eyebrow">QUANT TRADING ANALYSIS PLATFORM</p>
-      <h1>Terminal Access</h1>
-      <p class="subtitle">
-        Authenticate against the FastAPI backend (:8000) to access live MT5 market analysis and decision support.
-      </p>
 
       <form @submit.prevent="handleLogin">
         <label>
-          Operator Email
+          Email Address
           <input
             v-model="email"
             type="email"
@@ -212,7 +176,7 @@ watch(loggedIn, (isAuth) => {
         </label>
 
         <label>
-          Secret Key / Password
+          Password
           <input
             v-model="password"
             type="password"
@@ -223,178 +187,58 @@ watch(loggedIn, (isAuth) => {
         </label>
 
         <div v-if="loginError" class="login-error-alert">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z" />
-          </svg>
           <span>{{ loginError }}</span>
         </div>
 
         <button type="submit" class="login-submit-btn" :disabled="loginLoading">
-          <span v-if="loginLoading" class="btn-spinner"></span>
-          <span>{{ loginLoading ? 'Authenticating...' : 'Sign In to Terminal' }}</span>
+          <span>{{ loginLoading ? 'Authenticating...' : 'Sign In' }}</span>
         </button>
-
       </form>
-
-      <div class="login-footer-info">
-        <span>MANUAL EXECUTION SYSTEM &bull; MT5 BRIDGE INTEGRATED</span>
-      </div>
     </div>
   </div>
 
-  <!-- 2. TRADING TERMINAL WORKSTATION -->
-  <div v-else class="terminal-layout">
-    <!-- Sidebar Navigation -->
+  <!-- 2. QUANTTERMINAL APPLICATION SHELL (3-COLUMN SPA WITH ROUTER) -->
+  <div v-else class="app-shell">
+    <!-- LEFT SIDEBAR -->
     <NavigationSidebar
-      :current-view="currentView"
       :bridge-health="bridgeHealth"
-      :backend-connected="backendConnected"
-      @change-view="currentView = $event"
       @logout="handleLogout"
     />
 
-    <!-- Main Viewport Area -->
-    <div class="terminal-main">
-      <!-- Top Bar -->
+    <!-- MAIN VIEWPORT -->
+    <div class="main-viewport">
+      <!-- TOP BAR -->
       <TopBar
         :symbols="symbols"
         :selected-symbol="selectedSymbol"
         :current-price="analysisData?.key_levels?.current_price"
         :latest-candle="analysisData?.latest_candle"
-        :generated-at="analysisData?.generated_at_utc"
         :is-loading="isAnalysisLoading"
         :bridge-health="bridgeHealth"
-        :auto-refresh-interval="autoRefreshInterval"
         @select-symbol="handleSelectSymbol"
         @refresh="fetchAnalysis"
-        @update-auto-refresh="handleAutoRefreshChange"
         @logout="handleLogout"
       />
 
-      <!-- Content Container -->
-      <main class="terminal-content">
-        <!-- Error Banner if analysis failed -->
-        <div v-if="analysisError" class="terminal-error-banner">
-          <div class="error-banner-icon">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z" />
-            </svg>
-          </div>
-          <div class="error-banner-msg">
-            <strong>ANALYSIS FEED ERROR:</strong> {{ analysisError }}
-          </div>
-          <button class="btn-sm btn-secondary" @click="fetchAnalysis">
-            Retry Now
-          </button>
-        </div>
+      <!-- WORKSPACE AREA (ROUTE VIEWPORT + RIGHT AI PANEL) -->
+      <main class="cockpit-body">
+        <!-- ROUTE VIEWPORT -->
+        <router-view
+          :symbol="selectedSymbol"
+          :symbols="symbols"
+          :analysis-data="analysisData"
+          :bridge-health="bridgeHealth"
+          :is-bridge-offline="isBridgeOffline"
+          @select-symbol="handleSelectSymbol"
+          @retry="initTerminal"
+          @logout="handleLogout"
+        />
 
-        <!-- VIEW 1: DASHBOARD (Comprehensive Workstation) -->
-        <div v-if="currentView === 'dashboard'" class="dashboard-view">
-          <!-- 1. Market Overview Cards -->
-          <MarketOverviewCards
-            :symbol="selectedSymbol"
-            :market-bias="analysisData?.market_bias"
-            :selected-scenario="analysisData?.selected_scenario"
-            :confirmation="analysisData?.confirmation"
-            :current-price="analysisData?.key_levels?.current_price"
-            :latest-candle="analysisData?.latest_candle"
-            :trade-plan="analysisData?.trade_plan"
-            :stop-plan="analysisData?.stop_plan"
-          />
-
-          <!-- 2. Interactive Candlestick Chart (Hero Element) -->
-          <InteractiveChart
-            :symbol="selectedSymbol"
-            :key-levels="analysisData?.key_levels"
-            :selected-scenario="analysisData?.selected_scenario"
-          />
-
-          <!-- 3. Key Levels & Market Structure Side-by-Side -->
-          <div class="two-column-layout mt-3">
-            <KeyLevelsPanel
-              :key-levels="analysisData?.key_levels"
-              :selected-scenario="analysisData?.selected_scenario"
-              :symbol="selectedSymbol"
-            />
-            <MarketStructurePanel
-              :multi-timeframe="analysisData?.multi_timeframe"
-              :symbol="selectedSymbol"
-              initial-timeframe="M5"
-            />
-          </div>
-
-          <!-- 4. Multi-Timeframe Analysis Matrix -->
-          <MultiTimeframeGrid
-            :multi-timeframe="analysisData?.multi_timeframe"
-            :symbol="selectedSymbol"
-          />
-
-          <!-- 7. AI Reasoning Engine Panel -->
-          <AIReasoningPanel
-            :ai-data="analysisData?.ai"
-            :symbol="selectedSymbol"
-          />
-
-          <!-- 8. Conversational AI Assistant Panel -->
-          <AIChatAssistant
-            :symbol="selectedSymbol"
-            :analysis-data="analysisData"
-          />
-        </div>
-
-        <!-- VIEW 2: DEDICATED AI CHAT ASSISTANT -->
-        <div v-else-if="currentView === 'chat'" class="deep-dive-view">
-          <AIChatAssistant
-            :symbol="selectedSymbol"
-            :analysis-data="analysisData"
-          />
-          <AIReasoningPanel
-            :ai-data="analysisData?.ai"
-            :symbol="selectedSymbol"
-          />
-        </div>
-
-        <!-- VIEW 3: MARKET ANALYSIS DEEP DIVE -->
-        <div v-else-if="currentView === 'analysis'" class="deep-dive-view">
-          <InteractiveChart
-            :symbol="selectedSymbol"
-            :key-levels="analysisData?.key_levels"
-            :selected-scenario="analysisData?.selected_scenario"
-          />
-          <MultiTimeframeGrid
-            :multi-timeframe="analysisData?.multi_timeframe"
-            :symbol="selectedSymbol"
-          />
-          <MarketStructurePanel
-            :multi-timeframe="analysisData?.multi_timeframe"
-            :symbol="selectedSymbol"
-            initial-timeframe="M15"
-          />
-          <KeyLevelsPanel
-            :key-levels="analysisData?.key_levels"
-            :selected-scenario="analysisData?.selected_scenario"
-            :symbol="selectedSymbol"
-          />
-        </div>
-
-        <!-- VIEW 4: RISK & TRADE PLAN DEEP DIVE -->
-        <div v-else-if="currentView === 'risk'" class="deep-dive-view">
-          <TradePlanPanel
-            :trade-plan="analysisData?.trade_plan"
-            :stop-plan="analysisData?.stop_plan"
-            :symbol="selectedSymbol"
-          />
-          <RiskSettingsView
-            :trade-plan="analysisData?.trade_plan"
-            :stop-plan="analysisData?.stop_plan"
-            :symbol="selectedSymbol"
-          />
-        </div>
-
-        <!-- VIEW 5: SYSTEM SETTINGS & DIAGNOSTICS -->
-        <div v-else-if="currentView === 'settings'" class="settings-view">
-          <SettingsView @logout="handleLogout" />
-        </div>
+        <!-- RIGHT SIDE PANEL (AI ANALYST + COMPACT MARKET CONTEXT) -->
+        <AIChatAssistant
+          :symbol="selectedSymbol"
+          :analysis-data="analysisData"
+        />
       </main>
     </div>
   </div>

@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, watch, nextTick } from 'vue'
 import { sendAnalysisChat } from '../services/api'
+import { getBiasBadgeClass } from '../utils/formatters'
 
 const props = defineProps({
   symbol: {
@@ -16,7 +17,7 @@ const props = defineProps({
 const messages = ref([
   {
     role: 'assistant',
-    content: `Halo Trader! Saya adalah **AI Trading Analysis Assistant** yang terhubung langsung dengan engine analisa live untuk **${props.symbol}**.\n\nSaya dapat menjawab pertanyaan spesifik berdasarkan data teknikal saat ini (Market Bias, Multi-Timeframe, Key Levels, Skenario, Konfirmasi, Trade Plan & Risk).\n\n*Pilih salah satu pertanyaan di bawah atau ketik pertanyaan Anda.*`,
+    content: `Hello! I am your AI Analyst Assistant for **${props.symbol}**. Ask me any questions regarding the current market setup or reasoning.`,
     time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
   },
 ])
@@ -25,27 +26,25 @@ const inputMessage = ref('')
 const isLoading = ref(false)
 const chatMessagesRef = ref(null)
 
-const provider = computed(() => {
-  return props.analysisData?.ai?.provider || 'gemini'
-})
-
-const model = computed(() => {
-  return props.analysisData?.ai?.model || 'gemini-3.6-flash'
-})
-
-const quickPrompts = [
-  'Why no entry?',
-  'What confirms the setup?',
-  'What invalidates it?',
-  'Explain the higher timeframe.',
+const quickActions = [
+  'Explain setup',
+  'Why bearish?',
+  'What invalidates this?',
+  'Summarize analysis',
 ]
+
+const marketBias = computed(() => props.analysisData?.market_bias?.overall || 'Neutral')
+const marketStructure = computed(() => {
+  const mtf = props.analysisData?.multi_timeframe?.timeframes?.M5
+  return mtf?.structure || mtf?.trend || 'Lower Highs'
+})
 
 watch(
   () => props.symbol,
   (newSym) => {
     messages.value.push({
       role: 'assistant',
-      content: `Instrumen aktif dialihkan ke **${newSym}**. Analisis dan data teknikal telah diperbarui sesuai snapshot live MT5 untuk **${newSym}**. Silakan tanyakan kondisi setup saat ini.`,
+      content: `Active context updated to **${newSym}**. Ask about the latest technical setup.`,
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     })
     scrollToBottom()
@@ -90,17 +89,14 @@ async function handleSendMessage(textToSend) {
 
     messages.value.push({
       role: 'assistant',
-      content: res.reply,
+      content: res.reply || 'No response generated.',
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      provider: res.provider || provider.value,
-      model: res.model || model.value,
     })
   } catch (err) {
     messages.value.push({
       role: 'assistant',
-      content: 'Live AI analysis is unavailable. Check the backend and AI service connection.',
+      content: 'Unable to connect to live AI Analyst. Check backend service.',
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      isError: true,
     })
   } finally {
     isLoading.value = false
@@ -113,119 +109,77 @@ function renderMarkdown(text) {
   return text
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     .replace(/`(.*?)`/g, '<code>$1</code>')
-    .replace(/\*(.*?)\*/g, '<em>$1</em>')
     .replace(/\n\n/g, '<br><br>')
     .replace(/\n- /g, '<br>&bull; ')
-    .replace(/\n1\. /g, '<br>1. ')
-    .replace(/\n2\. /g, '<br>2. ')
-    .replace(/\n3\. /g, '<br>3. ')
-    .replace(/\n4\. /g, '<br>4. ')
 }
 </script>
 
 <template>
-  <div class="chat-assistant-container">
-    <!-- Header -->
-    <div class="chat-header">
-      <div class="chat-title-group">
-        <div>
-          <h2 class="chat-main-title">AI ASSISTANT</h2>
-          <span class="chat-sub-title">Based on current market analysis</span>
+  <div class="right-panel">
+    <!-- Compact Market Context Box -->
+    <div class="card-box">
+      <div class="card-header">
+        <span class="card-title">CURRENT CONTEXT</span>
+        <span class="font-mono text-xs font-bold text-accent">{{ symbol }}</span>
+      </div>
+      <div class="card-body" style="padding: 12px 16px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+          <span class="text-xs text-muted">Market Bias:</span>
+          <span class="badge badge-sm" :class="getBiasBadgeClass(marketBias)">
+            {{ String(marketBias).toUpperCase() }}
+          </span>
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <span class="text-xs text-muted">Structure (M5):</span>
+          <span class="font-mono text-xs text-main font-bold">{{ marketStructure.toUpperCase() }}</span>
         </div>
       </div>
-
-      <div class="chat-header-pills">
-        <span class="badge font-mono font-bold">{{ symbol }}</span>
-      </div>
     </div>
 
-    <!-- Offline State -->
-    <div v-if="!analysisData" class="chat-offline-state p-4 text-center">
-      <div class="alert-warning mb-2">
-        <span class="font-bold text-amber">Analysis Unavailable</span>
+    <!-- AI Analyst Box -->
+    <div class="card-box ai-panel-box">
+      <div class="card-header">
+        <span class="card-title">AI ANALYST</span>
       </div>
-      <p class="text-muted">Live market analysis is unavailable. Refresh the market data before asking for analysis.</p>
-    </div>
 
-    <template v-else>
-      <!-- Quick Prompt Chips -->
-    <div class="quick-prompts-bar">
-      <span class="prompts-label">QUICK QUERIES:</span>
-      <div class="prompts-scroll">
-        <button
-          v-for="(prompt, idx) in quickPrompts"
+      <div ref="chatMessagesRef" class="chat-flow">
+        <div
+          v-for="(msg, idx) in messages"
           :key="idx"
-          class="prompt-chip-btn"
-          :disabled="isLoading"
-          @click="handleSendMessage(prompt)"
+          class="chat-bubble"
+          :class="msg.role"
         >
-          {{ prompt }}
-        </button>
-      </div>
-    </div>
-
-    <!-- Messages Flow -->
-    <div ref="chatMessagesRef" class="chat-messages-wrap">
-      <div
-        v-for="(msg, idx) in messages"
-        :key="idx"
-        class="chat-bubble-row"
-        :class="msg.role === 'user' ? 'bubble-user' : 'bubble-assistant'"
-      >
-        <div class="bubble-avatar">
-          {{ msg.role === 'user' ? 'ME' : 'AI' }}
-        </div>
-
-        <div class="bubble-content-box">
-          <div class="bubble-meta">
-            <span class="bubble-author">
-              {{ msg.role === 'user' ? 'Trader' : `AI Analyst (${msg.model || model})` }}
-            </span>
-            <span class="bubble-time font-mono">{{ msg.time }}</span>
-          </div>
-
           <!-- eslint-disable-next-line vue/no-v-html -->
-          <div class="bubble-text" v-html="renderMarkdown(msg.content)"></div>
+          <div v-html="renderMarkdown(msg.content)"></div>
+        </div>
+
+        <div v-if="isLoading" class="chat-bubble assistant text-muted text-xs">
+          Analyzing market setup...
         </div>
       </div>
 
-      <!-- Typing indicator -->
-      <div v-if="isLoading" class="chat-bubble-row bubble-assistant">
-        <div class="bubble-avatar">AI</div>
-        <div class="bubble-content-box typing-box">
-          <span class="typing-dot"></span>
-          <span class="typing-dot"></span>
-          <span class="typing-dot"></span>
-          <span class="typing-text">Menelaah data teknikal & skenario {{ symbol }}...</span>
-        </div>
+      <div class="quick-actions-bar">
+        <span
+          v-for="(action, idx) in quickActions"
+          :key="idx"
+          class="action-chip"
+          @click="handleSendMessage(action)"
+        >
+          {{ action }}
+        </span>
       </div>
-    </div>
 
-    <!-- Input Form -->
-    <form class="chat-input-form" @submit.prevent="handleSendMessage()">
-      <div class="input-container">
+      <form class="chat-input-row" @submit.prevent="handleSendMessage()">
         <input
           v-model="inputMessage"
           type="text"
-          class="chat-input-field"
-          :placeholder="`Tanyakan analisis ${symbol} (misal: Kenapa belum ada entry?)...`"
+          placeholder="Ask about this analysis..."
           :disabled="isLoading"
         />
-        <button type="submit" class="chat-send-btn" :disabled="!inputMessage.trim() || isLoading">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
-          </svg>
-          <span>Kirim</span>
+        <button type="submit" class="btn btn-primary btn-sm" :disabled="!inputMessage.trim() || isLoading">
+          Send
         </button>
-      </div>
-    </form>
-
-    <!-- Grounding & Safety Footer -->
-    <div class="chat-footer-policy">
-      <span>
-        Decision Support Only &bull; No Auto Execution
-      </span>
+      </form>
     </div>
-    </template>
   </div>
 </template>

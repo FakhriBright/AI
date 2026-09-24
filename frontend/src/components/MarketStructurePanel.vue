@@ -32,44 +32,33 @@ const swings = computed(() => {
   return currentTfData.value?.swings || []
 })
 
-const structureDirection = computed(() => {
-  return currentTfData.value?.structure || 'Unavailable'
+const structureState = computed(() => {
+  return currentTfData.value?.structure || 'Neutral'
 })
 
-function getLabelColorClass(label) {
-  if (!label) return 'label-neutral'
-  if (label === 'HH' || label === 'HL') return 'label-bullish'
-  if (label === 'LH' || label === 'LL') return 'label-bearish'
-  return 'label-neutral'
-}
+// Extract latest swing points by label
+const swingHH = computed(() => swings.value.find(s => s.label === 'HH'))
+const swingHL = computed(() => swings.value.find(s => s.label === 'HL'))
+const swingLH = computed(() => swings.value.find(s => s.label === 'LH'))
+const swingLL = computed(() => swings.value.find(s => s.label === 'LL'))
 
-function getLabelDesc(label) {
-  switch (label) {
-    case 'HH': return 'Higher High (Bullish Expansion)'
-    case 'HL': return 'Higher Low (Bullish Retracement)'
-    case 'LH': return 'Lower High (Bearish Retracement)'
-    case 'LL': return 'Lower Low (Bearish Expansion)'
-    default: return 'Swing Reference'
-  }
+function getLabelBadgeClass(label) {
+  if (label === 'HH' || label === 'HL') return 'badge-bullish'
+  if (label === 'LH' || label === 'LL') return 'badge-bearish'
+  return 'badge-neutral'
 }
 </script>
 
 <template>
-  <div class="panel-container">
-    <div class="panel-header">
-      <div class="panel-title-wrap">
-        <svg class="panel-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-          <path d="M3.5 18.49l6-6.01 4 4L22 6.92l-1.41-1.41-7.09 7.97-4-4L2 16.99z" />
-        </svg>
-        <h2 class="panel-title">MARKET STRUCTURE (HH / HL / LH / LL)</h2>
-      </div>
-
-      <!-- Timeframe Selector Tabs -->
-      <div class="tf-btn-group">
+  <div class="card-box">
+    <div class="card-header">
+      <span class="card-title">MARKET STRUCTURE</span>
+      <!-- Timeframe Segmented Control -->
+      <div class="segmented-control">
         <button
           v-for="tf in timeframesList"
           :key="tf"
-          class="tf-tab-btn"
+          class="segment-btn"
           :class="{ active: selectedTf === tf }"
           @click="selectedTf = tf"
         >
@@ -78,93 +67,87 @@ function getLabelDesc(label) {
       </div>
     </div>
 
-    <!-- Structure Summary Banner -->
-    <div class="structure-summary-banner">
-      <div class="summary-left">
-        <span class="structure-caption">STRUCTURE STATE ({{ selectedTf }}):</span>
-        <span class="badge" :class="getBiasBadgeClass(structureDirection)">
-          {{ structureDirection.toUpperCase() }}
+    <div class="card-body">
+      <!-- Structure State Header -->
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+        <span class="text-xs text-muted font-bold">STRUCTURE STATE ({{ selectedTf }}):</span>
+        <span class="badge" :class="getBiasBadgeClass(structureState)">
+          {{ structureState.toUpperCase() }}
         </span>
       </div>
-      <div class="structure-legend">
-        <span class="legend-item"><span class="legend-dot dot-hh"></span>HH: Higher High</span>
-        <span class="legend-item"><span class="legend-dot dot-hl"></span>HL: Higher Low</span>
-        <span class="legend-item"><span class="legend-dot dot-lh"></span>LH: Lower High</span>
-        <span class="legend-item"><span class="legend-dot dot-ll"></span>LL: Lower Low</span>
-      </div>
-    </div>
 
-    <!-- Swings Visual Flow / Cards -->
-    <div v-if="swings.length" class="swings-flow-wrap">
-      <div class="swings-track">
-        <div
-          v-for="(swing, idx) in swings"
-          :key="idx"
-          class="swing-node-card"
-          :class="getLabelColorClass(swing.label)"
-        >
-          <div class="node-header">
-            <span class="node-badge" :class="getLabelColorClass(swing.label)">
-              {{ swing.label || '—' }}
-            </span>
-            <span class="node-type">
-              {{ swing.type === 'swing_high' ? 'HIGH' : 'LOW' }}
-            </span>
+      <!-- Clean 4-Grid Key Swing Levels -->
+      <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px;">
+        <div class="metric-card" style="padding: 8px 10px;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span class="badge badge-sm badge-bullish">HH</span>
+            <span class="text-xs text-muted">Higher High</span>
           </div>
+          <span class="metric-val font-mono text-sm" style="margin-top: 4px;">
+            {{ swingHH ? formatPrice(swingHH.price, symbol) : '—' }}
+          </span>
+        </div>
 
-          <div class="node-price font-mono">
-            {{ formatPrice(swing.price, symbol) }}
+        <div class="metric-card" style="padding: 8px 10px;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span class="badge badge-sm badge-bullish">HL</span>
+            <span class="text-xs text-muted">Higher Low</span>
           </div>
+          <span class="metric-val font-mono text-sm" style="margin-top: 4px;">
+            {{ swingHL ? formatPrice(swingHL.price, symbol) : '—' }}
+          </span>
+        </div>
 
-          <div class="node-desc">
-            {{ getLabelDesc(swing.label) }}
+        <div class="metric-card" style="padding: 8px 10px;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span class="badge badge-sm badge-bearish">LH</span>
+            <span class="text-xs text-muted">Lower High</span>
           </div>
+          <span class="metric-val font-mono text-sm" style="margin-top: 4px;">
+            {{ swingLH ? formatPrice(swingLH.price, symbol) : '—' }}
+          </span>
+        </div>
 
-          <div class="node-time">
-            {{ formatDateTimeUtc(swing.time_utc) }}
+        <div class="metric-card" style="padding: 8px 10px;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span class="badge badge-sm badge-bearish">LL</span>
+            <span class="text-xs text-muted">Lower Low</span>
           </div>
+          <span class="metric-val font-mono text-sm" style="margin-top: 4px;">
+            {{ swingLL ? formatPrice(swingLL.price, symbol) : '—' }}
+          </span>
         </div>
       </div>
-    </div>
-    <div v-else class="empty-state-box">
-      <span>No swing points detected for {{ selectedTf }} on {{ symbol }}.</span>
-    </div>
 
-    <!-- Swings Log Table -->
-    <div v-if="swings.length" class="table-responsive mt-3">
-      <table class="terminal-table table-compact">
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>TIME (UTC)</th>
-            <th>SWING TYPE</th>
-            <th>LABEL</th>
-            <th>PRICE</th>
-            <th>STRUCTURE SIGNIFICANCE</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="(swing, idx) in swings.slice().reverse()" :key="idx">
-            <td class="text-muted">{{ swings.length - idx }}</td>
-            <td class="font-mono text-xs">{{ formatDateTimeUtc(swing.time_utc) }}</td>
-            <td>
-              <span
-                class="badge badge-sm"
-                :class="swing.type === 'swing_high' ? 'badge-bullish' : 'badge-bearish'"
-              >
-                {{ swing.type === 'swing_high' ? 'SWING HIGH' : 'SWING LOW' }}
-              </span>
-            </td>
-            <td>
-              <span class="label-pill font-bold" :class="getLabelColorClass(swing.label)">
-                {{ swing.label || 'None' }}
-              </span>
-            </td>
-            <td class="font-mono font-bold">{{ formatPrice(swing.price, symbol) }}</td>
-            <td class="text-xs text-muted">{{ getLabelDesc(swing.label) }}</td>
-          </tr>
-        </tbody>
-      </table>
+      <!-- Expandable Swing History Table -->
+      <details class="details-accordion">
+        <summary style="padding: 8px 12px; font-size: 11px;">View Structure Swing Log ({{ swings.length }})</summary>
+        <div style="padding: 8px 12px;">
+          <div v-if="swings.length" style="overflow-x: auto;">
+            <table class="terminal-table table-compact" style="width: 100%; font-size: 11px;">
+              <thead>
+                <tr>
+                  <th style="text-align: left; padding: 4px;">Type</th>
+                  <th style="text-align: left; padding: 4px;">Label</th>
+                  <th style="text-align: right; padding: 4px;">Price</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(s, idx) in swings.slice(0, 6)" :key="idx">
+                  <td style="padding: 4px;" class="text-muted">{{ s.type === 'swing_high' ? 'High' : 'Low' }}</td>
+                  <td style="padding: 4px;">
+                    <span class="badge badge-sm" :class="getLabelBadgeClass(s.label)">{{ s.label || '—' }}</span>
+                  </td>
+                  <td style="padding: 4px; text-align: right;" class="font-mono font-bold">{{ formatPrice(s.price, symbol) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-else class="text-xs text-muted p-2">
+            No swing points detected.
+          </div>
+        </div>
+      </details>
     </div>
   </div>
 </template>

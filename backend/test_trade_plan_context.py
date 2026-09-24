@@ -27,7 +27,7 @@ async def test_symbol(provider, symbol):
     scenarios = build_scenarios(
         context=context,
         bias=bias,
-        levels=levels,
+        levels=levels, 
     )
 
     candles = await provider.get_candles(
