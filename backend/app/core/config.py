@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     # Groq provider (used when ai_provider="groq")
     groq_api_key: str = ""
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "openai/gpt-oss-120b"
 
     # Auth
     jwt_secret: str
