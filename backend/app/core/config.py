@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     ai_provider: str = "gemini"
     ai_api_key: str = ""
 
+    # Groq provider (used when ai_provider="groq")
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.3-70b-versatile"
+
     # Auth
     jwt_secret: str
     jwt_algorithm: str = "HS256"

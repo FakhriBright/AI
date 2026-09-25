@@ -3,12 +3,13 @@ from functools import lru_cache
 from app.core.config import settings
 from app.services.ai.base import AIProvider
 from app.services.ai.gemini_provider import GeminiAIProvider
+from app.services.ai.groq_provider import GroqAIProvider
 from app.services.ai.mock_provider import MockAIProvider
 
-# Gemini is the only production AI provider. Anthropic support existed in an
-# earlier iteration (backend/app/services/ai/anthropic_provider.py remains on
-# disk for reference) but is intentionally not imported or selectable here,
-# so there is no accidental runtime switch to it.
+# Gemini and Groq are the production AI providers. Anthropic support existed
+# in an earlier iteration (backend/app/services/ai/anthropic_provider.py
+# remains on disk for reference) but is intentionally not imported or
+# selectable here, so there is no accidental runtime switch to it.
 
 
 @lru_cache
@@ -22,6 +23,11 @@ def get_ai_provider() -> AIProvider:
         # like a real AI answer.
         return GeminiAIProvider()
 
+    if settings.ai_provider == "groq":
+        # Same contract as Gemini: GroqAIProvider raises RuntimeError if
+        # GROQ_API_KEY is missing — no silent fallback, no fake responses.
+        return GroqAIProvider()
+
     if settings.ai_provider == "mock":
         # Explicit opt-in only (AI_PROVIDER=mock), for local development and
         # automated tests without a live Gemini API key. Never selected as a
@@ -30,6 +36,6 @@ def get_ai_provider() -> AIProvider:
 
     raise ValueError(
         f"Unknown AI_PROVIDER: {settings.ai_provider!r}. "
-        "Supported values in this build: 'gemini', 'mock'."
+        "Supported values in this build: 'gemini', 'groq', 'mock'."
     )
 
