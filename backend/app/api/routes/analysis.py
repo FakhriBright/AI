@@ -1,10 +1,11 @@
 from dataclasses import asdict
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.core.rate_limit import rate_limiter
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.analysis import AnalysisResponse, AnalysisChatRequest, AnalysisChatResponse
@@ -90,6 +91,7 @@ def _build_response(
 )
 async def analyze_market(
     symbol: str,
+    request: Request,
     count: int = Query(
         default=300,
         ge=200,
@@ -101,6 +103,7 @@ async def analyze_market(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    rate_limiter.check(request, custom_limit=20)
     risk_settings = current_user.risk_settings
     risk_percent = (
         float(risk_settings.risk_percent)
@@ -119,8 +122,16 @@ async def analyze_market(
             count=count,
         )
 
+        if result.ai_response.raw and result.ai_response.raw.get("status") == "error":
+            raise HTTPException(
+                status_code=502,
+                detail=result.ai_response.analysis or "AI provider service failure",
+            )
+
         return _build_response(result)
 
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=502,
@@ -138,26 +149,21 @@ async def analyze_market(
 )
 async def chat_analysis(
     payload: AnalysisChatRequest,
+    request: Request,
     symbol: str | None = None,
     provider: MarketDataProvider = Depends(get_market_data_provider),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    rate_limiter.check(request, custom_limit=15)
     target_symbol = symbol or payload.symbol
+    capped_message = payload.message.strip()[:500]
 
     try:
         ai_service = AIReasoningService(provider=get_ai_provider())
     except Exception as exc:
-        # e.g. GeminiAIProvider raising because AI_API_KEY is not configured.
-        # Controlled, explicit failure — never a response that looks like a
-        # real AI answer.
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    # --- Server-side deterministic context (authoritative) ---
-    # Use cached deterministic context when available (within TTL).
-    # This avoids re-running 7-timeframe data fetch + indicator computation
-    # on every chat message.  The full-analysis endpoint (and auto-refresh)
-    # always refreshes the deterministic cache.
     risk_percent = (
         float(current_user.risk_settings.risk_percent)
         if current_user.risk_settings
@@ -172,26 +178,21 @@ async def chat_analysis(
         )
         context = select_chat_context(
             det.ai_context,
-            payload.message,
+            capped_message,
         )
         context = _json_safe(context)
     except Exception as exc:
-        # Pipeline failure → controlled 502. Never send incomplete/error
-        # data to Gemini and ask it to answer from that.
         raise HTTPException(
             status_code=502,
             detail="Live market analysis is unavailable.",
         ) from exc
 
-    # --- Conversational reasoning layer ---
-    # Any provider failure (missing key, network error, rate limit, outage)
-    # propagates as a controlled 502 rather than a silently generated
-    # fallback answer.
-    history_dicts = [{"role": h.role, "content": h.content} for h in payload.history]
+    # Cap conversational history depth to last 4 messages to save prompt tokens
+    history_dicts = [{"role": h.role, "content": h.content[:300]} for h in payload.history[-4:]]
     try:
         ai_response = await ai_service.chat(
             context=context,
-            message=payload.message,
+            message=capped_message,
             history=history_dicts,
         )
         raw = ai_response.raw or {}

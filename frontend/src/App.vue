@@ -85,6 +85,8 @@ async function checkBridgeHealth() {
   }
 }
 
+const lastKnownCandleTime = ref(null)
+
 async function fetchAnalysis() {
   if (!loggedIn.value) return
 
@@ -94,6 +96,9 @@ async function fetchAnalysis() {
   try {
     const data = await getAnalysis(selectedSymbol.value)
     analysisData.value = data
+    if (data?.latest_candle?.time_utc) {
+      lastKnownCandleTime.value = data.latest_candle.time_utc
+    }
   } catch (err) {
     analysisError.value = 'Unable to load market data.'
     if (err.message && err.message.toLowerCase().includes('session expired')) {
@@ -107,16 +112,29 @@ async function fetchAnalysis() {
 function handleSelectSymbol(newSymbol) {
   if (selectedSymbol.value === newSymbol) return
   selectedSymbol.value = newSymbol
+  lastKnownCandleTime.value = null
   fetchAnalysis()
+}
+
+async function handleAutoRefresh() {
+  if (!loggedIn.value || isAnalysisLoading.value) return
+  await checkBridgeHealth()
+
+  // Skip triggering full analysis/AI if market candle timestamp has not changed
+  if (analysisData.value?.latest_candle?.time_utc) {
+    const currentCandleTime = analysisData.value.latest_candle.time_utc
+    if (lastKnownCandleTime.value && lastKnownCandleTime.value === currentCandleTime) {
+      return
+    }
+  }
+
+  await fetchAnalysis()
 }
 
 function startAutoRefresh() {
   stopAutoRefresh()
   refreshTimer = setInterval(() => {
-    if (loggedIn.value && !isAnalysisLoading.value) {
-      fetchAnalysis()
-      checkBridgeHealth()
-    }
+    handleAutoRefresh()
   }, 30000)
 }
 

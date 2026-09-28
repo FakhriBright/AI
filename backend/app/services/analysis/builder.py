@@ -6,7 +6,7 @@ from app.services.technical.indicators import ema, rsi, macd, atr
 from app.services.technical.structure import find_swings, classify_structure
 from app.services.technical.trend import analyze_trend
 
-from app.services.analysis.candles import select_analysis_candles
+from app.services.analysis.candles import select_analysis_candles, validate_candle_series
 from app.services.analysis.snapshot import (
     AnalysisSnapshot,
     IndicatorSnapshot,
@@ -38,6 +38,8 @@ async def build_analysis_snapshot(
             timeframe=timeframe,
             count=count,
         )
+
+        validate_candle_series(candles, timeframe)
 
         analysis_candles = select_analysis_candles(
             candles,

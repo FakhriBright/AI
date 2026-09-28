@@ -15,8 +15,8 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+    expose:
+      - "5432"
 
   backend:
     build:
@@ -36,7 +36,9 @@ services:
     build:
       context: ./frontend
     restart: unless-stopped
-    env_file: .env
+    environment:
+      - VITE_API_URL=${VITE_API_URL}
+      - VITE_API_BASE_URL=${VITE_API_BASE_URL}
     depends_on:
       - backend
     ports:
