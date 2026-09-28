@@ -3,7 +3,6 @@ from functools import lru_cache
 from app.core.config import settings
 from app.services.ai.base import AIProvider
 from app.services.ai.gemini_provider import GeminiAIProvider
-from app.services.ai.groq_provider import GroqAIProvider
 from app.services.ai.mock_provider import MockAIProvider
 
 # Gemini and Groq are the production AI providers. Anthropic support existed
@@ -24,8 +23,7 @@ def get_ai_provider() -> AIProvider:
         return GeminiAIProvider()
 
     if settings.ai_provider == "groq":
-        # Same contract as Gemini: GroqAIProvider raises RuntimeError if
-        # GROQ_API_KEY is missing — no silent fallback, no fake responses.
+        from app.services.ai.groq_provider import GroqAIProvider
         return GroqAIProvider()
 
     if settings.ai_provider == "mock":

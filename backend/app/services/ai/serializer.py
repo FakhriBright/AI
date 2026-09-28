@@ -1,3 +1,5 @@
+import json
+from copy import deepcopy
 from dataclasses import asdict
 from typing import Any
 
@@ -225,3 +227,24 @@ def build_ai_context(
             trade_plan
         ),
     }
+
+
+def dumps_compact(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def fingerprint_context(ai_context: dict[str, Any]) -> dict[str, Any]:
+    """
+    Context fields that affect AI reasoning.
+
+    generated_at_utc is request metadata. It stays in the AI payload so the
+    model can report freshness, but it must not change the cache key.
+    """
+    payload = deepcopy(ai_context)
+    payload.pop("generated_at_utc", None)
+    return payload

@@ -8,9 +8,15 @@ from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.analysis import AnalysisResponse, AnalysisChatRequest, AnalysisChatResponse
+from app.services.ai.chat_context import select_chat_context
 from app.services.ai.factory import get_ai_provider
+from app.services.ai.metrics import metrics_collector
 from app.services.ai.reasoning import AIReasoningService
-from app.services.analysis.pipeline import AnalysisPipelineResult, analyze_symbol
+from app.services.analysis.pipeline import (
+    AnalysisPipelineResult,
+    analyze_symbol,
+    get_deterministic_context,
+)
 from app.services.market_data.factory import get_market_data_provider
 from app.services.market_data.base import MarketDataProvider
 
@@ -148,24 +154,27 @@ async def chat_analysis(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     # --- Server-side deterministic context (authoritative) ---
-    # Always run the deterministic analysis pipeline to obtain fresh,
-    # trustworthy market context. Client-provided analysis_context is
-    # intentionally ignored — the AI must reason from server-verified data,
-    # never from arbitrary payloads the browser could fabricate.
+    # Use cached deterministic context when available (within TTL).
+    # This avoids re-running 7-timeframe data fetch + indicator computation
+    # on every chat message.  The full-analysis endpoint (and auto-refresh)
+    # always refreshes the deterministic cache.
     risk_percent = (
         float(current_user.risk_settings.risk_percent)
         if current_user.risk_settings
         else None
     )
     try:
-        result = await analyze_symbol(
+        det = await get_deterministic_context(
             symbol=target_symbol,
             provider=provider,
-            ai_service=ai_service,
             risk_percent=risk_percent,
             count=300,
         )
-        context = _json_safe(result.ai_context)
+        context = select_chat_context(
+            det.ai_context,
+            payload.message,
+        )
+        context = _json_safe(context)
     except Exception as exc:
         # Pipeline failure → controlled 502. Never send incomplete/error
         # data to Gemini and ask it to answer from that.
@@ -185,6 +194,20 @@ async def chat_analysis(
             message=payload.message,
             history=history_dicts,
         )
+        raw = ai_response.raw or {}
+        usage = raw.get("usage", {})
+        p_tok = usage.get("prompt_tokens", len(str(context)) // 4)
+        c_tok = usage.get("completion_tokens", len(ai_response.analysis) // 4)
+        t_type = usage.get("type", "ESTIMATED")
+        metrics_collector.record_call(
+            feature="AI Analyst Chat",
+            provider=ai_response.provider,
+            model=ai_response.model,
+            cache_status="MISS",
+            prompt_tokens=p_tok,
+            completion_tokens=c_tok,
+            token_type=t_type,
+        )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -194,4 +217,3 @@ async def chat_analysis(
         provider=ai_response.provider,
         model=ai_response.model,
     )
-

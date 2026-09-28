@@ -2,9 +2,10 @@ from typing import Any
 
 from app.services.ai.base import AIProvider, AIResponse
 from app.services.ai.prompt import build_analysis_prompt
+from app.services.ai.serializer import dumps_compact
 
 
-SYSTEM_INSTRUCTION = """
+SYSTEM_INSTRUCTION = """\
 You are a trading analysis reasoning assistant.
 
 Your job is to interpret structured market-analysis data
@@ -29,10 +30,12 @@ When information is unavailable, explicitly say that it is unavailable.
 
 Do not turn deterministic analysis into certainty.
 Market analysis is probabilistic and can be wrong.
-"""
+
+Be concise. Do not repeat the structured context or the question.
+""".strip()
 
 
-CHAT_SYSTEM_INSTRUCTION = """
+CHAT_SYSTEM_INSTRUCTION = """\
 You are an expert AI trading analysis reasoning assistant embedded in an institutional-grade manual trading workstation.
 Your task is to answer the trader's questions regarding the selected instrument and its current deterministic analysis context.
 
@@ -48,7 +51,8 @@ MANDATORY BEHAVIORAL DIRECTIVES:
    - "Jelaskan kondisi [symbol] dari H4 sampai M5": Systematically present H4, H1, M30, M15, M5 trend, structure (HH/HL/LH/LL), EMAs, RSI, and MACD as observed in the context.
    - "Apa invalidation dari scenario ini?": Specify the exact invalidation condition and invalidation_reference level.
 6. TONE & LANGUAGE: Disciplined, objective, and quantitative. Respond in the language used by the trader (e.g., Bahasa Indonesia if asked in Indonesian, English if asked in English).
-"""
+7. CONCISION: Answer the question directly. No preamble, no restating the context JSON, no generic market education unless asked.
+""".strip()
 
 
 class AIReasoningService:
@@ -67,7 +71,7 @@ class AIReasoningService:
             {
                 "system_instruction": SYSTEM_INSTRUCTION,
                 "analysis_prompt": analysis_prompt,
-                "market_context": context,
+                "max_tokens": 3200,
             }
         )
 
@@ -77,37 +81,31 @@ class AIReasoningService:
         message: str,
         history: list[dict[str, str]] | None = None,
     ) -> AIResponse:
-        import json
-
         history_text = ""
         if history:
-            history_text = "\nPREVIOUS CONVERSATION:\n" + "\n".join(
-                f"{h.get('role', 'user').upper()}: {h.get('content', '')}"
-                for h in history[-6:]
-            )
+            lines = []
+            for item in history[-6:]:
+                role = item.get("role", "user").upper()
+                content = item.get("content", "")
+                if role == "USER" and content.strip() == message.strip():
+                    continue
+                lines.append(f"{role}: {content}")
+            if lines:
+                history_text = "\nPREVIOUS CONVERSATION:\n" + "\n".join(lines)
 
-        chat_prompt = f"""
-STRUCTURED MARKET CONTEXT:
-{json.dumps(context, ensure_ascii=False, indent=2 if isinstance(context, dict) else None)}
-{history_text}
+        chat_prompt = (
+            "STRUCTURED MARKET CONTEXT:\n"
+            f"{dumps_compact(context)}"
+            f"{history_text}\n\n"
+            "TRADER QUESTION:\n"
+            f"{message}\n\n"
+            "Answer the question directly and strictly from the context above."
+        )
 
-TRADER QUESTION:
-{message}
-
-Answer the question directly, thoroughly, and strictly based on the context above.
-""".strip()
-
-        # Production behavior: the provider's response is returned as-is on
-        # success, and any failure (missing API key, network error, rate
-        # limit, provider outage) is propagated to the caller rather than
-        # masked with a deterministic fallback that looks like a real AI
-        # reply. See app/api/routes/analysis.py for how this is turned into
-        # a controlled HTTP error for the frontend.
         return await self.provider.analyze(
             {
                 "system_instruction": CHAT_SYSTEM_INSTRUCTION,
                 "analysis_prompt": chat_prompt,
-                "market_context": context,
+                "max_tokens": 1600,
             }
         )
-

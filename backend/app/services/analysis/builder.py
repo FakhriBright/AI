@@ -6,6 +6,7 @@ from app.services.technical.indicators import ema, rsi, macd, atr
 from app.services.technical.structure import find_swings, classify_structure
 from app.services.technical.trend import analyze_trend
 
+from app.services.analysis.candles import select_analysis_candles
 from app.services.analysis.snapshot import (
     AnalysisSnapshot,
     IndicatorSnapshot,
@@ -38,16 +39,22 @@ async def build_analysis_snapshot(
             count=count,
         )
 
-        if len(candles) < 200:
+        analysis_candles = select_analysis_candles(
+            candles,
+            timeframe=timeframe,
+            min_count=200,
+        )
+
+        if len(analysis_candles) < 200:
             raise ValueError(
                 f"Insufficient candle data for {symbol} {timeframe}: "
-                f"{len(candles)} candles"
+                f"{len(analysis_candles)} candles"
             )
 
-        closes = [c.close for c in candles]
-        highs = [c.high for c in candles]
-        lows = [c.low for c in candles]
-        times = [c.time_utc for c in candles]
+        closes = [c.close for c in analysis_candles]
+        highs = [c.high for c in analysis_candles]
+        lows = [c.low for c in analysis_candles]
+        times = [c.time_utc for c in analysis_candles]
 
         ema20_value = ema(closes, 20)[-1]
         ema50_value = ema(closes, 50)[-1]
@@ -119,7 +126,7 @@ async def build_analysis_snapshot(
 
         timeframe_snapshot = TimeframeSnapshot(
             timeframe=timeframe,
-            candle_time_utc=candles[-1].time_utc,
+            candle_time_utc=analysis_candles[-1].time_utc,
             price=closes[-1],
             indicators=indicator_snapshot,
             structure=structure_snapshot,

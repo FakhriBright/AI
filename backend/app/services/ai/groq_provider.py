@@ -19,6 +19,7 @@ class GroqAIProvider:
             api_key=settings.groq_api_key,
         )
 
+        self.provider = "groq"
         self.model = settings.groq_model
 
     async def analyze(
@@ -26,9 +27,9 @@ class GroqAIProvider:
         context: dict[str, Any],
     ) -> AIResponse:
 
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[
+        create_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": [
                 {
                     "role": "system",
                     "content": context["system_instruction"],
@@ -38,7 +39,15 @@ class GroqAIProvider:
                     "content": context["analysis_prompt"],
                 },
             ],
-            temperature=0.3,
+            "temperature": 0.3,
+        }
+
+        max_tokens = context.get("max_tokens")
+        if isinstance(max_tokens, int) and max_tokens > 0:
+            create_kwargs["max_tokens"] = max_tokens
+
+        response = await self.client.chat.completions.create(
+            **create_kwargs,
         )
 
         choice = response.choices[0]
@@ -53,6 +62,7 @@ class GroqAIProvider:
                 "model": response.model,
                 "finish_reason": choice.finish_reason,
                 "usage": {
+                    "type": "ACTUAL",
                     "prompt_tokens": response.usage.prompt_tokens,
                     "completion_tokens": response.usage.completion_tokens,
                     "total_tokens": response.usage.total_tokens,

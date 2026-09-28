@@ -1,6 +1,13 @@
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any
 
+from app.services.ai.cache import (
+    get_cached_analysis,
+    make_analysis_fingerprint,
+    store_cached_analysis,
+)
+from app.services.ai.metrics import metrics_collector
 from app.services.ai.reasoning import AIReasoningService
 from app.services.ai.serializer import build_ai_context
 from app.services.analysis.bias import MarketBias, build_market_bias
@@ -34,6 +41,85 @@ class AnalysisPipelineResult:
     trade_plan: TradePlan
     ai_context: dict[str, Any]
     ai_response: AIResponse
+    ai_cached: bool = False
+
+
+@dataclass
+class DeterministicContext:
+    """Deterministic pipeline output without AI call.
+
+    Cached and reused by chat endpoint so that every chat message does not
+    re-run 7-timeframe data fetch + indicator computation + scenario analysis.
+    """
+    snapshot: AnalysisSnapshot
+    context: MultiTimeframeContext
+    bias: MarketBias
+    levels: KeyLevels
+    scenarios: ScenarioAnalysis
+    selected_scenario: Scenario
+    latest_candle: Candle
+    confirmation: ConfirmationResult
+    stop_plan: StopPlan | None
+    trade_plan: TradePlan
+    ai_context: dict[str, Any]
+
+
+# ---------------------------------------------------------------
+# Deterministic context cache
+#
+# Chat messages arrive frequently.  Each one was previously running the
+# full deterministic pipeline (7 × MT5 candle fetch, indicators, bias,
+# levels, scenarios, confirmation, stop, risk, trade plan).
+#
+# The cache stores the latest DeterministicContext *per symbol* with a
+# time-to-live (TTL).  Within the TTL window every chat message reuses
+# the same context — zero additional MT5 / pipeline cost.
+#
+# The full-analysis endpoint (and the 30-second auto-refresh) always
+# runs the pipeline fresh and refreshes this cache as a side-effect.
+# ---------------------------------------------------------------
+
+_DETERMINISTIC_CACHE_TTL_SECONDS = 25  # < auto-refresh interval (30 s)
+
+_DeterministicCacheKey = tuple[str, float | None, int]
+
+
+@dataclass
+class _CachedDeterministic:
+    ctx: DeterministicContext
+    timestamp: float  # monotonic clock
+
+
+_deterministic_cache: dict[_DeterministicCacheKey, _CachedDeterministic] = {}
+
+
+def _store_deterministic(
+    symbol: str,
+    risk_percent: float | None,
+    count: int,
+    ctx: DeterministicContext,
+) -> None:
+    key = (symbol, risk_percent, count)
+    _deterministic_cache[key] = _CachedDeterministic(
+        ctx=ctx,
+        timestamp=monotonic(),
+    )
+
+
+def _get_deterministic(
+    symbol: str,
+    risk_percent: float | None,
+    count: int,
+) -> DeterministicContext | None:
+    key = (symbol, risk_percent, count)
+    entry = _deterministic_cache.get(key)
+    if entry is None:
+        return None
+    age = monotonic() - entry.timestamp
+    if age > _DETERMINISTIC_CACHE_TTL_SECONDS:
+        _deterministic_cache.pop(key, None)
+        return None
+    return entry.ctx
 
 
 def _select_scenario(
@@ -65,13 +151,25 @@ def _select_scenario(
     )
 
 
-async def analyze_symbol(
+def _provider_identity(ai_service: AIReasoningService) -> tuple[str, str]:
+    provider = ai_service.provider
+    provider_name = getattr(
+        provider,
+        "provider",
+        type(provider).__name__,
+    )
+    model = getattr(provider, "model", "")
+    return str(provider_name), str(model)
+
+
+async def _build_deterministic(
     symbol: str,
     provider: MarketDataProvider,
-    ai_service: AIReasoningService,
     risk_percent: float | None = None,
     count: int = 300,
-) -> AnalysisPipelineResult:
+) -> DeterministicContext:
+    """Run the full deterministic pipeline (no AI call)."""
+
     snapshot = await build_analysis_snapshot(
         provider=provider,
         symbol=symbol,
@@ -217,20 +315,7 @@ async def analyze_symbol(
         trade_plan=trade_plan,
     )
 
-    try:
-        ai_response = await ai_service.analyze(ai_context)
-    except Exception as exc:
-        ai_response = AIResponse(
-            provider="gemini",
-            model="gemini-3.6-flash",
-            analysis=f"AI analysis unavailable: {exc}",
-            raw={
-                "status": "error",
-                "error_type": type(exc).__name__,
-            },
-        )
-
-    return AnalysisPipelineResult(
+    det = DeterministicContext(
         snapshot=snapshot,
         context=context,
         bias=bias,
@@ -242,5 +327,132 @@ async def analyze_symbol(
         stop_plan=stop_plan,
         trade_plan=trade_plan,
         ai_context=ai_context,
+    )
+
+    # Always refresh the deterministic cache for (symbol, risk_percent, count).
+    _store_deterministic(symbol, risk_percent, count, det)
+
+    return det
+
+
+async def get_deterministic_context(
+    symbol: str,
+    provider: MarketDataProvider,
+    risk_percent: float | None = None,
+    count: int = 300,
+) -> DeterministicContext:
+    """Return cached deterministic context if fresh, otherwise rebuild.
+
+    Used by the chat endpoint to avoid re-running the full pipeline on
+    every message.  The full-analysis endpoint calls analyze_symbol()
+    which always rebuilds and refreshes this cache.
+    """
+    cached = _get_deterministic(symbol, risk_percent, count)
+    if cached is not None:
+        return cached
+
+    return await _build_deterministic(
+        symbol=symbol,
+        provider=provider,
+        risk_percent=risk_percent,
+        count=count,
+    )
+
+
+async def analyze_symbol(
+    symbol: str,
+    provider: MarketDataProvider,
+    ai_service: AIReasoningService,
+    risk_percent: float | None = None,
+    count: int = 300,
+    run_ai: bool = True,
+) -> AnalysisPipelineResult:
+
+    det = await _build_deterministic(
+        symbol=symbol,
+        provider=provider,
+        risk_percent=risk_percent,
+        count=count,
+    )
+
+    ai_cached = False
+
+    if not run_ai:
+        ai_response = AIResponse(
+            provider="skipped",
+            model="skipped",
+            analysis="",
+            raw={"status": "skipped"},
+        )
+    else:
+        provider_name, model = _provider_identity(ai_service)
+        fingerprint = make_analysis_fingerprint(
+            det.ai_context,
+            provider_name=provider_name,
+            model=model,
+        )
+        cached = get_cached_analysis(fingerprint)
+
+        if cached is not None:
+            ai_response = cached
+            ai_cached = True
+            raw = dict(ai_response.raw or {})
+            raw["cache_hit"] = True
+            ai_response.raw = raw
+            usage = raw.get("usage", {})
+            tokens_saved = usage.get("total_tokens", 2500)
+            metrics_collector.record_call(
+                feature="Full Analysis",
+                provider=provider_name,
+                model=model,
+                cache_status="HIT",
+                prompt_tokens=0,
+                completion_tokens=0,
+                token_type=usage.get("type", "ACTUAL"),
+                tokens_saved=tokens_saved,
+            )
+        else:
+            try:
+                ai_response = await ai_service.analyze(det.ai_context)
+            except Exception as exc:
+                ai_response = AIResponse(
+                    provider=provider_name,
+                    model=model or "unknown",
+                    analysis=f"AI analysis unavailable: {exc}",
+                    raw={
+                        "status": "error",
+                        "error_type": type(exc).__name__,
+                    },
+                )
+            else:
+                store_cached_analysis(fingerprint, ai_response)
+                raw = ai_response.raw or {}
+                usage = raw.get("usage", {})
+                p_tok = usage.get("prompt_tokens", 0)
+                c_tok = usage.get("completion_tokens", 0)
+                t_type = usage.get("type", "ACTUAL")
+                metrics_collector.record_call(
+                    feature="Full Analysis",
+                    provider=provider_name,
+                    model=model,
+                    cache_status="MISS",
+                    prompt_tokens=p_tok,
+                    completion_tokens=c_tok,
+                    token_type=t_type,
+                )
+
+    return AnalysisPipelineResult(
+        snapshot=det.snapshot,
+        context=det.context,
+        bias=det.bias,
+        levels=det.levels,
+        scenarios=det.scenarios,
+        selected_scenario=det.selected_scenario,
+        latest_candle=det.latest_candle,
+        confirmation=det.confirmation,
+        stop_plan=det.stop_plan,
+        trade_plan=det.trade_plan,
+        ai_context=det.ai_context,
         ai_response=ai_response,
+        ai_cached=ai_cached,
     )

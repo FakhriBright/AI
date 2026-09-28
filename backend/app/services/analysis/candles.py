@@ -55,3 +55,28 @@ def get_closed_candles(
             now,
         )
     ]
+
+
+def select_analysis_candles(
+    candles: list,
+    timeframe: str,
+    min_count: int = 200,
+    now: datetime | None = None,
+) -> list:
+    """
+    Bars used for deterministic technical analysis / AI reasoning.
+
+    Live UI may still consume the forming candle separately (latest_candle,
+    confirmation). Forming OHLC changes on every tick and would otherwise
+    retrigger identical reasoning.
+    """
+    closed = get_closed_candles(
+        candles,
+        timeframe,
+        now=now,
+    )
+
+    if len(closed) >= min_count:
+        return closed
+
+    return list(candles)
