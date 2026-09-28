@@ -62,6 +62,25 @@ class MarketDataInvalid(ValueError):
     pass
 
 
+def is_weekend_gap(t1: datetime, t2: datetime) -> bool:
+    """
+    Returns True if the gap between t1 and t2 represents a normal weekend market closure
+    (e.g., Friday close to Sunday/Monday open, <= 72 hours).
+    Python weekday(): Mon=0, Tue=1, Wed=2, Thu=3, Fri=4, Sat=5, Sun=6.
+    """
+    gap_sec = (t2 - t1).total_seconds()
+    if gap_sec <= 0 or gap_sec > (72 * 3600):
+        return False
+
+    w1 = t1.weekday()
+    w2 = t2.weekday()
+
+    if w1 in (3, 4, 5) and w2 in (6, 0):
+        return True
+
+    return False
+
+
 def validate_candle_series(
     candles: list,
     timeframe: str,
@@ -94,7 +113,7 @@ def validate_candle_series(
             f"is older than {max_stale_hours} hours"
         )
 
-    # 2. Gap check: abnormal gap between consecutive candles
+    # 2. Gap check: abnormal gap between consecutive candles (allowing normal weekend closures)
     tf_minutes = TIMEFRAME_MINUTES.get(timeframe, 1)
     expected_delta_sec = tf_minutes * 60
     max_allowed_gap_sec = expected_delta_sec * max_gap_multiplier
@@ -112,9 +131,10 @@ def validate_candle_series(
             raise MarketDataInvalid(f"Out of order timestamps in candle series for {timeframe}: {t1} > {t2}")
 
         if gap_sec > max_allowed_gap_sec:
-            raise MarketDataInvalid(
-                f"Abnormal gap detected in {timeframe} candles between {t1.isoformat()} and {t2.isoformat()} ({gap_sec / 60:.1f} min)"
-            )
+            if not is_weekend_gap(t1, t2):
+                raise MarketDataInvalid(
+                    f"Abnormal gap detected in {timeframe} candles between {t1.isoformat()} and {t2.isoformat()} ({gap_sec / 60:.1f} min)"
+                )
 
 
 def select_analysis_candles(
