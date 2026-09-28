@@ -189,6 +189,8 @@ def _compact_trade_plan(
         "entry_price": trade_plan.entry_price,
         "stop_price": trade_plan.stop_price,
         "stop_distance": trade_plan.stop_distance,
+        "target_price": getattr(trade_plan, "target_price", None),
+        "rr_ratio": getattr(trade_plan, "rr_ratio", None),
         "risk_percent": trade_plan.risk_percent,
         "risk_amount": trade_plan.risk_amount,
         "volume": trade_plan.volume,

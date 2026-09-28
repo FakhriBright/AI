@@ -25,6 +25,10 @@ RULES:
 - If a reference is null, report it as unavailable. Do not infer or derive a substitute.
 - Never swap trigger_reference for invalidation_reference or vice versa.
 - Fundamental data is unavailable unless explicitly provided in context. Do NOT invent economic news or events; mark fundamental analysis as 'Unavailable / Belum tersedia'.
+- DIRECTIONAL ALIGNMENT: A break and close below support is a BEARISH continuation/breakout (direction = bearish). A break and close above resistance is a BULLISH breakout (direction = bullish). A support test and bounce/reclaim is a BULLISH reversal (direction = bullish).
+- RECLAIM vs BREAKOUT: If price bounces off support or reclaims a level, refer to it strictly as 'reclaim' or 'support rejection', NEVER call it a true breakout.
+- NO CONTRADICTORY OUTPUT: The scenario label, trigger type, and natural-language reasoning MUST NOT contradict each other (e.g. never describe a break below support as bullish or a break above resistance as bearish).
+- SPREAD vs ATR: The 0.25 * ATR buffer is a market-noise volatility buffer. If MT5 Bid/Ask spread is not explicitly present, do not claim actual Bid/Ask spread is included.
 
 OUTPUT DISCIPLINE:
 - Start with findings. No preamble, no restating the question or JSON.

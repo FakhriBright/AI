@@ -9,6 +9,36 @@ from app.services.analysis.scenario import Scenario
 from app.services.analysis.stop import StopPlan
 
 
+def calculate_rr(
+    direction: str,
+    entry_price: float,
+    stop_price: float,
+    target_price: float,
+) -> float:
+    """
+    Calculate Risk-to-Reward ratio for LONG and SHORT setups.
+
+    LONG:  (target_price - entry_price) / (entry_price - stop_price)
+    SHORT: (entry_price - target_price) / (stop_price - entry_price)
+    """
+    if direction in ("bullish", "long"):
+        risk = entry_price - stop_price
+        reward = target_price - entry_price
+    elif direction in ("bearish", "short"):
+        risk = stop_price - entry_price
+        reward = entry_price - target_price
+    else:
+        raise ValueError(f"Invalid direction for R:R calculation: {direction!r}")
+
+    if risk <= 0:
+        raise ValueError("Invalid stop price: risk distance must be greater than zero")
+
+    if reward <= 0:
+        raise ValueError("Invalid target price: reward distance must be greater than zero")
+
+    return reward / risk
+
+
 @dataclass
 class TradePlan:
     symbol: str
@@ -19,6 +49,8 @@ class TradePlan:
     entry_price: float | None = None
     stop_price: float | None = None
     stop_distance: float | None = None
+    target_price: float | None = None
+    rr_ratio: float | None = None
 
     risk_percent: float | None = None
     risk_amount: float | None = None
@@ -233,7 +265,25 @@ def build_trade_plan(
     # Complete trade plan
     # --------------------------------------------------------
 
-    reasons.extend(stop_plan.reasons)
+    target_price: float | None = None
+    rr_ratio: float | None = None
+
+    if stop_plan is not None and levels is not None:
+        if scenario.direction == "bullish" and levels.resistances:
+            target_price = levels.resistances[0].price
+        elif scenario.direction == "bearish" and levels.supports:
+            target_price = levels.supports[0].price
+
+        if target_price is not None:
+            try:
+                rr_ratio = calculate_rr(
+                    direction=scenario.direction,
+                    entry_price=stop_plan.entry_price,
+                    stop_price=stop_plan.stop_price,
+                    target_price=target_price,
+                )
+            except ValueError:
+                rr_ratio = None
 
     return TradePlan(
         symbol=symbol,
@@ -244,6 +294,8 @@ def build_trade_plan(
         entry_price=stop_plan.entry_price,
         stop_price=stop_plan.stop_price,
         stop_distance=stop_plan.stop_distance,
+        target_price=target_price,
+        rr_ratio=rr_ratio,
 
         risk_percent=risk_plan.risk_percent,
         risk_amount=risk_plan.risk_amount,
