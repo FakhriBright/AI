@@ -1,3 +1,4 @@
+import logging
 from dataclasses import asdict
 from typing import Any
 
@@ -21,6 +22,7 @@ from app.services.analysis.pipeline import (
 from app.services.market_data.factory import get_market_data_provider
 from app.services.market_data.base import MarketDataProvider
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 
@@ -123,9 +125,10 @@ async def analyze_market(
         )
 
         if result.ai_response.raw and result.ai_response.raw.get("status") == "error":
+            logger.error(f"AI provider returned error status: {result.ai_response.analysis}")
             raise HTTPException(
                 status_code=502,
-                detail=result.ai_response.analysis or "AI provider service failure",
+                detail="AI analysis temporarily unavailable",
             )
 
         return _build_response(result)
@@ -133,9 +136,10 @@ async def analyze_market(
     except HTTPException:
         raise
     except Exception as exc:
+        logger.exception("Unexpected error during analyze_market")
         raise HTTPException(
             status_code=502,
-            detail=str(exc),
+            detail="AI analysis temporarily unavailable",
         ) from exc
 
 
@@ -162,7 +166,8 @@ async def chat_analysis(
     try:
         ai_service = AIReasoningService(provider=get_ai_provider())
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        logger.exception("Error initializing AI service for chat")
+        raise HTTPException(status_code=502, detail="AI analysis temporarily unavailable") from exc
 
     risk_percent = (
         float(current_user.risk_settings.risk_percent)
@@ -182,6 +187,7 @@ async def chat_analysis(
         )
         context = _json_safe(context)
     except Exception as exc:
+        logger.exception("Error preparing context for chat")
         raise HTTPException(
             status_code=502,
             detail="Live market analysis is unavailable.",
@@ -210,7 +216,8 @@ async def chat_analysis(
             token_type=t_type,
         )
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        logger.exception("Error during AI chat completion")
+        raise HTTPException(status_code=502, detail="AI analysis temporarily unavailable") from exc
 
     return AnalysisChatResponse(
         symbol=target_symbol,
