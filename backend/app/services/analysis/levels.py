@@ -19,6 +19,7 @@ class LevelZone:
     level_type: str
     timeframes: list[str] = field(default_factory=list)
     touches: int = 0
+    is_fresh: bool = False
 
 
 @dataclass
@@ -27,6 +28,8 @@ class KeyLevels:
     current_price: float
     supports: list[LevelZone] = field(default_factory=list)
     resistances: list[LevelZone] = field(default_factory=list)
+    demand_zones: list[LevelZone] = field(default_factory=list)
+    supply_zones: list[LevelZone] = field(default_factory=list)
 
 
 def _collect_levels(context: MultiTimeframeContext) -> list[PriceLevel]:
@@ -99,12 +102,78 @@ def _cluster_levels(
     return zones
 
 
+def _build_supply_demand_zones(context: MultiTimeframeContext) -> tuple[list[LevelZone], list[LevelZone]]:
+    supply_zones = []
+    demand_zones = []
+
+    for timeframe, data in context.timeframes.items():
+        candles = data.candles
+        if len(candles) < 14:
+            continue
+            
+        bodies = [abs(c.close - c.open) for c in candles[-14:]]
+        avg_body = sum(bodies) / len(bodies) if bodies else 0.0001
+        
+        for i in range(1, len(candles) - 1):
+            base_candle = candles[i]
+            next_candle = candles[i+1]
+            
+            base_body = abs(base_candle.close - base_candle.open)
+            next_body = abs(next_candle.close - next_candle.open)
+            
+            if base_body < avg_body * 0.8 and next_body > avg_body * 1.5:
+                is_bullish_impulse = next_candle.close > next_candle.open
+                is_bearish_impulse = next_candle.close < next_candle.open
+                
+                if is_bullish_impulse:
+                    zone_low = base_candle.low
+                    zone_high = max(base_candle.high, next_candle.low)
+                    
+                    is_fresh = True
+                    for j in range(i+2, len(candles)):
+                        if candles[j].low <= zone_high:
+                            is_fresh = False
+                            break
+                            
+                    demand_zones.append(LevelZone(
+                        price=(zone_low + zone_high)/2,
+                        low=zone_low,
+                        high=zone_high,
+                        level_type="demand",
+                        timeframes=[timeframe],
+                        touches=0 if is_fresh else 1,
+                        is_fresh=is_fresh
+                    ))
+                elif is_bearish_impulse:
+                    zone_low = min(base_candle.low, next_candle.high)
+                    zone_high = base_candle.high
+                    
+                    is_fresh = True
+                    for j in range(i+2, len(candles)):
+                        if candles[j].high >= zone_low:
+                            is_fresh = False
+                            break
+                            
+                    supply_zones.append(LevelZone(
+                        price=(zone_low + zone_high)/2,
+                        low=zone_low,
+                        high=zone_high,
+                        level_type="supply",
+                        timeframes=[timeframe],
+                        touches=0 if is_fresh else 1,
+                        is_fresh=is_fresh
+                    ))
+                    
+    return supply_zones, demand_zones
+
+
 def build_key_levels(
     context: MultiTimeframeContext,
 ) -> KeyLevels:
     current_price = context.timeframes["M1"].price
 
     levels = _collect_levels(context)
+    supply_zones_list, demand_zones_list = _build_supply_demand_zones(context)
 
     supports = []
     resistances = []
@@ -122,12 +191,6 @@ def build_key_levels(
         ):
             resistances.append(level)
 
-    # Tolerance is intentionally small.
-    # EURUSD: 0.00020 ~= 2 pips
-    # XAUUSD: 0.20 ~= 20 cents
-    #
-    # This is a first-pass clustering rule and can later become
-    # symbol-aware using tick size / ATR.
     if current_price < 10:
         tolerance = 0.00020
     else:
@@ -150,12 +213,22 @@ def build_key_levels(
     resistance_zones.sort(
         key=lambda zone: zone.price - current_price
     )
+    
+    demand_zones_list.sort(
+        key=lambda zone: current_price - zone.price if zone.price < current_price else zone.price - current_price
+    )
+    
+    supply_zones_list.sort(
+        key=lambda zone: zone.price - current_price if zone.price > current_price else current_price - zone.price
+    )
 
     return KeyLevels(
         symbol=context.symbol,
         current_price=current_price,
         supports=support_zones,
         resistances=resistance_zones,
+        demand_zones=demand_zones_list,
+        supply_zones=supply_zones_list,
     )
 
 

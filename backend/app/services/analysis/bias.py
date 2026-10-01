@@ -132,9 +132,9 @@ def build_market_bias(
     bullish_groups = directions.count("bullish")
     bearish_groups = directions.count("bearish")
 
-    if bullish_groups == 3:
+    if bullish_groups > bearish_groups:
         overall = "bullish"
-    elif bearish_groups == 3:
+    elif bearish_groups > bullish_groups:
         overall = "bearish"
     else:
         overall = "mixed"
