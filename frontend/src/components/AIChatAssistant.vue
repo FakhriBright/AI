@@ -83,8 +83,7 @@ async function handleSendMessage(textToSend) {
     const res = await sendAnalysisChat(
       props.symbol,
       query,
-      historyPayload,
-      props.analysisData
+      historyPayload
     )
 
     messages.value.push({
@@ -93,9 +92,13 @@ async function handleSendMessage(textToSend) {
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     })
   } catch (err) {
+    const detail = String(err?.message || '').trim()
+
     messages.value.push({
       role: 'assistant',
-      content: 'Unable to connect to live AI Analyst. Check backend service.',
+      content: detail
+        ? `AI Analyst unavailable: ${detail}`
+        : 'AI Analyst unavailable. Check the backend service.',
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     })
   } finally {

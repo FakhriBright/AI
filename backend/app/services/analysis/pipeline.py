@@ -362,7 +362,7 @@ async def get_deterministic_context(
 async def analyze_symbol(
     symbol: str,
     provider: MarketDataProvider,
-    ai_service: AIReasoningService,
+    ai_service: AIReasoningService | None,
     risk_percent: float | None = None,
     count: int = 300,
     run_ai: bool = True,
@@ -385,6 +385,30 @@ async def analyze_symbol(
             raw={"status": "skipped"},
         )
     else:
+        if ai_service is None:
+            provider_name, model = "unavailable", "unavailable"
+            ai_response = AIResponse(
+                provider=provider_name,
+                model=model,
+                analysis="AI analysis unavailable.",
+                raw={"status": "unavailable", "error_type": "provider_initialization"},
+            )
+            return AnalysisPipelineResult(
+                snapshot=det.snapshot,
+                context=det.context,
+                bias=det.bias,
+                levels=det.levels,
+                scenarios=det.scenarios,
+                selected_scenario=det.selected_scenario,
+                latest_candle=det.latest_candle,
+                confirmation=det.confirmation,
+                stop_plan=det.stop_plan,
+                trade_plan=det.trade_plan,
+                ai_context=det.ai_context,
+                ai_response=ai_response,
+                ai_cached=False,
+            )
+
         provider_name, model = _provider_identity(ai_service)
         fingerprint = make_analysis_fingerprint(
             det.ai_context,

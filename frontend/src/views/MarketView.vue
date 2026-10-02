@@ -6,6 +6,7 @@ const props = defineProps({
   symbol: { type: String, default: 'EURUSDm' },
   symbols: { type: Array, default: () => ['EURUSDm', 'XAUUSDm'] },
   analysisData: { type: Object, default: null },
+  liveTick: { type: Object, default: null },
   bridgeHealth: { type: Object, default: () => ({}) },
   isBridgeOffline: { type: Boolean, default: false },
 })
@@ -22,6 +23,9 @@ const symbolInfoMap = {
 const activeInfo = computed(() => symbolInfoMap[props.symbol] || { name: props.symbol, digits: 5, category: 'Trading Instrument' })
 
 const currentPrice = computed(() => {
+  if (props.liveTick?.bid !== null && props.liveTick?.bid !== undefined) {
+    return formatPrice(props.liveTick.bid, props.symbol)
+  }
   if (props.analysisData?.key_levels?.current_price !== null && props.analysisData?.key_levels?.current_price !== undefined) {
     return formatPrice(props.analysisData.key_levels.current_price, props.symbol)
   }

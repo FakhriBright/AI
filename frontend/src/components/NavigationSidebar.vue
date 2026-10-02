@@ -7,9 +7,13 @@ const props = defineProps({
     type: Object,
     default: () => ({}),
   },
+  collapsed: {
+    type: Boolean,
+    default: false,
+  },
 })
 
-const emit = defineEmits(['logout'])
+const emit = defineEmits(['logout', 'toggle-collapse'])
 
 const route = useRoute()
 
@@ -25,13 +29,32 @@ function isActive(itemPath) {
 </script>
 
 <template>
-  <aside class="sidebar">
+  <aside class="sidebar" :class="{ collapsed: collapsed }">
     <div class="sidebar-brand">
-      <div class="brand-icon">Q</div>
-      <div class="brand-text">
-        <span class="brand-title">QUANTTERMINAL</span>
-        <span class="brand-subtitle">Trading Analysis</span>
+      <div class="brand-left">
+        <!-- Logo Slot: Custom image slot with fallback letter icon -->
+        <div class="brand-icon" title="QUANTTERMINAL">
+          <slot name="logo">
+            <span>Q</span>
+          </slot>
+        </div>
+        <div class="brand-text">
+          <span class="brand-title">QUANTTERMINAL</span>
+          <span class="brand-subtitle">Trading Analysis</span>
+        </div>
       </div>
+
+      <!-- Exactly ONE Collapse / Expand Toggle Button -->
+      <button
+        class="sidebar-toggle-btn"
+        :title="collapsed ? 'Expand Sidebar' : 'Collapse Sidebar'"
+        @click="emit('toggle-collapse')"
+      >
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+          <path v-if="collapsed" d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z" />
+          <path v-else d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z" />
+        </svg>
+      </button>
     </div>
 
     <nav class="sidebar-nav">
@@ -41,6 +64,7 @@ function isActive(itemPath) {
         :to="item.path"
         class="nav-btn"
         :class="{ active: isActive(item.path) }"
+        :title="collapsed ? item.label : ''"
       >
         <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
           <path :d="item.icon" />
@@ -54,6 +78,7 @@ function isActive(itemPath) {
         to="/settings"
         class="nav-btn"
         :class="{ active: route.path === '/settings' }"
+        :title="collapsed ? 'Settings' : ''"
       >
         <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
           <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.49.49 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54A.48.48 0 0014 2h-4a.48.48 0 00-.49.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 00-.59.22L2.63 8.47c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.08.63-.08.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h4c.24 0 .44-.17.49-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z" />
@@ -61,7 +86,11 @@ function isActive(itemPath) {
         <span>Settings</span>
       </router-link>
 
-      <button class="nav-btn logout-btn" @click="emit('logout')">
+      <button
+        class="nav-btn logout-btn"
+        :title="collapsed ? 'Logout' : ''"
+        @click="emit('logout')"
+      >
         <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
           <path d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z" />
         </svg>

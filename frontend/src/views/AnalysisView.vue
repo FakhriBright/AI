@@ -12,6 +12,7 @@ import AIReasoningPanel from '../components/AIReasoningPanel.vue'
 const props = defineProps({
   symbol: { type: String, default: 'EURUSDm' },
   analysisData: { type: Object, default: null },
+  liveTick: { type: Object, default: null },
   isBridgeOffline: { type: Boolean, default: false },
 })
 
@@ -27,7 +28,7 @@ const emit = defineEmits(['retry'])
       :selected-scenario="analysisData?.selected_scenario"
       :confirmation="analysisData?.confirmation"
       :trade-plan="analysisData?.trade_plan"
-      :current-price="analysisData?.key_levels?.current_price"
+      :current-price="liveTick?.bid ?? analysisData?.key_levels?.current_price"
       :latest-candle="analysisData?.latest_candle"
     />
 

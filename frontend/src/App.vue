@@ -7,8 +7,10 @@ import {
   getAnalysis,
   getMarketSymbols,
   getMarketHealth,
+  getMarketTick,
 } from './services/api'
 
+import { getInitialTheme, applyTheme, toggleThemeCurrent } from './utils/themeManager'
 import NavigationSidebar from './components/NavigationSidebar.vue'
 import TopBar from './components/TopBar.vue'
 import AIChatAssistant from './components/AIChatAssistant.vue'
@@ -18,6 +20,50 @@ import LoginView from './components/LoginView.vue'
 const loginLoading = ref(false)
 const loginError = ref('')
 const loggedIn = ref(Boolean(getStoredToken()))
+
+// Theme State
+const currentTheme = ref(getInitialTheme())
+
+function handleToggleTheme() {
+  currentTheme.value = toggleThemeCurrent()
+}
+
+// Sidebar Collapse State
+const isSidebarCollapsed = ref(false)
+
+function toggleSidebar() {
+  isSidebarCollapsed.value = !isSidebarCollapsed.value
+}
+
+// Resizable AI Panel Width State
+const aiPanelWidth = ref(360)
+const isResizing = ref(false)
+let startX = 0
+let startWidth = 0
+
+function startResizing(e) {
+  isResizing.value = true
+  startX = e.clientX
+  startWidth = aiPanelWidth.value
+  window.addEventListener('mousemove', onMouseMove)
+  window.addEventListener('mouseup', onMouseUp)
+}
+
+function onMouseMove(e) {
+  if (!isResizing.value) return
+  // Dragging left increases AI panel width, dragging right decreases it
+  const delta = startX - e.clientX
+  const newWidth = Math.min(Math.max(280, startWidth + delta), 650)
+  aiPanelWidth.value = newWidth
+}
+
+function onMouseUp() {
+  if (isResizing.value) {
+    isResizing.value = false
+    window.removeEventListener('mousemove', onMouseMove)
+    window.removeEventListener('mouseup', onMouseUp)
+  }
+}
 
 // Data State
 const symbols = ref(['EURUSDm', 'XAUUSDm'])
@@ -32,6 +78,9 @@ const isBridgeOffline = computed(() => {
 })
 
 let refreshTimer = null
+let tickTimer = null
+
+const liveTick = ref(null)
 
 async function handleLogin(credentials) {
   loginError.value = ''
@@ -57,6 +106,7 @@ function handleLogout() {
   logout()
   loggedIn.value = false
   analysisData.value = null
+  liveTick.value = null
   stopAutoRefresh()
 }
 
@@ -92,20 +142,49 @@ async function fetchAnalysis() {
 
   isAnalysisLoading.value = true
   analysisError.value = ''
+  const targetSymbol = selectedSymbol.value
 
   try {
-    const data = await getAnalysis(selectedSymbol.value)
+    const data = await getAnalysis(targetSymbol)
+
+    // Ignore stale response if user switched symbol while request was running.
+    if (selectedSymbol.value !== targetSymbol) return
+
     analysisData.value = data
     if (data?.latest_candle?.time_utc) {
       lastKnownCandleTime.value = data.latest_candle.time_utc
     }
   } catch (err) {
+    if (selectedSymbol.value !== targetSymbol) return
+
     analysisError.value = 'Unable to load market data.'
     if (err.message && err.message.toLowerCase().includes('session expired')) {
       handleLogout()
     }
   } finally {
-    isAnalysisLoading.value = false
+    if (selectedSymbol.value === targetSymbol) {
+      isAnalysisLoading.value = false
+    }
+  }
+}
+
+async function fetchLiveTick() {
+  if (!loggedIn.value) return
+
+  const targetSymbol = selectedSymbol.value
+
+  try {
+    const tick = await getMarketTick(targetSymbol)
+
+    // Ignore stale response if user switched symbol while request was running.
+    if (selectedSymbol.value !== targetSymbol) return
+
+    if (tick) {
+      liveTick.value = tick
+    }
+  } catch (err) {
+    // Keep the last known tick. The next poll can recover automatically.
+    console.warn('Could not load live tick:', err.message)
   }
 }
 
@@ -113,7 +192,10 @@ function handleSelectSymbol(newSymbol) {
   if (selectedSymbol.value === newSymbol) return
   selectedSymbol.value = newSymbol
   lastKnownCandleTime.value = null
+  analysisData.value = null
+  liveTick.value = null
   fetchAnalysis()
+  fetchLiveTick()
 }
 
 async function handleAutoRefresh() {
@@ -133,9 +215,14 @@ async function handleAutoRefresh() {
 
 function startAutoRefresh() {
   stopAutoRefresh()
+
   refreshTimer = setInterval(() => {
     handleAutoRefresh()
   }, 30000)
+
+  tickTimer = setInterval(() => {
+    fetchLiveTick()
+  }, 2000)
 }
 
 function stopAutoRefresh() {
@@ -143,16 +230,22 @@ function stopAutoRefresh() {
     clearInterval(refreshTimer)
     refreshTimer = null
   }
+
+  if (tickTimer) {
+    clearInterval(tickTimer)
+    tickTimer = null
+  }
 }
 
 async function initTerminal() {
   await checkBridgeHealth()
   await fetchSymbols()
-  await fetchAnalysis()
+  await Promise.all([fetchAnalysis(), fetchLiveTick()])
   startAutoRefresh()
 }
 
 onMounted(() => {
+  applyTheme(currentTheme.value)
   window.addEventListener('auth:expired', onAuthExpired)
   if (loggedIn.value) {
     initTerminal()
@@ -161,6 +254,8 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('auth:expired', onAuthExpired)
+  window.removeEventListener('mousemove', onMouseMove)
+  window.removeEventListener('mouseup', onMouseUp)
   stopAutoRefresh()
 })
 
@@ -187,6 +282,8 @@ watch(loggedIn, (isAuth) => {
     <!-- LEFT SIDEBAR -->
     <NavigationSidebar
       :bridge-health="bridgeHealth"
+      :collapsed="isSidebarCollapsed"
+      @toggle-collapse="toggleSidebar"
       @logout="handleLogout"
     />
 
@@ -196,33 +293,48 @@ watch(loggedIn, (isAuth) => {
       <TopBar
         :symbols="symbols"
         :selected-symbol="selectedSymbol"
-        :current-price="analysisData?.key_levels?.current_price"
+        :current-price="liveTick?.bid ?? analysisData?.key_levels?.current_price"
+        :live-tick="liveTick"
         :latest-candle="analysisData?.latest_candle"
         :is-loading="isAnalysisLoading"
         :bridge-health="bridgeHealth"
+        :current-theme="currentTheme"
         @select-symbol="handleSelectSymbol"
         @refresh="fetchAnalysis"
+        @toggle-theme="handleToggleTheme"
         @logout="handleLogout"
       />
 
-      <!-- WORKSPACE AREA (ROUTE VIEWPORT + RIGHT AI PANEL) -->
+      <!-- WORKSPACE AREA (MAIN CONTENT | RESIZE DIVIDER | RIGHT AI PANEL) -->
       <main class="cockpit-body">
-        <!-- ROUTE VIEWPORT -->
-        <router-view
-          :symbol="selectedSymbol"
-          :symbols="symbols"
-          :analysis-data="analysisData"
-          :bridge-health="bridgeHealth"
-          :is-bridge-offline="isBridgeOffline"
-          @select-symbol="handleSelectSymbol"
-          @retry="initTerminal"
-          @logout="handleLogout"
-        />
+        <!-- MAIN CONTENT (ROUTE VIEWPORT) -->
+        <div class="cockpit-main-content">
+          <router-view
+            :symbol="selectedSymbol"
+            :symbols="symbols"
+            :analysis-data="analysisData"
+            :live-tick="liveTick"
+            :bridge-health="bridgeHealth"
+            :is-bridge-offline="isBridgeOffline"
+            @select-symbol="handleSelectSymbol"
+            @retry="initTerminal"
+            @logout="handleLogout"
+          />
+        </div>
 
-        <!-- RIGHT SIDE PANEL (AI ANALYST + COMPACT MARKET CONTEXT) -->
+        <!-- HORIZONTAL RESIZE DIVIDER (DRAG HANDLE) -->
+        <div
+          class="resize-divider"
+          :class="{ 'is-resizing': isResizing }"
+          title="Drag to resize AI Analyst panel"
+          @mousedown.prevent="startResizing"
+        ></div>
+
+        <!-- RIGHT SIDE PANEL (AI ANALYST - RESIZABLE) -->
         <AIChatAssistant
           :symbol="selectedSymbol"
           :analysis-data="analysisData"
+          :style="{ width: aiPanelWidth + 'px' }"
         />
       </main>
     </div>

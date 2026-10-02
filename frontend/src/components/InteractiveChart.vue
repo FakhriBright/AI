@@ -90,13 +90,15 @@ function renderChart() {
 
   ctx.scale(dpr, dpr)
 
-  // Clean white surface
-  ctx.fillStyle = '#ffffff'
+  const isDark = document.documentElement.getAttribute('data-theme') === 'dark'
+
+  // Dynamic canvas surface background
+  ctx.fillStyle = isDark ? '#131b2e' : '#ffffff'
   ctx.fillRect(0, 0, width, height)
 
   const candleList = candles.value
   if (!candleList || candleList.length === 0) {
-    ctx.fillStyle = '#64748b'
+    ctx.fillStyle = isDark ? '#94a3b8' : '#64748b'
     ctx.font = '13px sans-serif'
     ctx.textAlign = 'center'
     ctx.fillText(
@@ -146,8 +148,8 @@ function renderChart() {
   // Horizontal Grid & Price Axis
   const gridSteps = 5
   ctx.lineWidth = 1
-  ctx.strokeStyle = '#e2e8f0'
-  ctx.fillStyle = '#475569'
+  ctx.strokeStyle = isDark ? 'rgba(255, 255, 255, 0.08)' : '#e2e8f0'
+  ctx.fillStyle = isDark ? '#94a3b8' : '#475569'
   ctx.font = '10px monospace'
   ctx.textAlign = 'left'
 
@@ -286,7 +288,7 @@ function renderChart() {
       ctx.stroke()
 
       const hoveredPrice = chartMin + ((height - padding.bottom - mousePos.value.y) / chartHeight) * adjustedRange
-      ctx.fillStyle = '#0f172a'
+      ctx.fillStyle = isDark ? '#1c273e' : '#0f172a'
       ctx.fillRect(width - padding.right + 2, mousePos.value.y - 8, 60, 16)
       ctx.fillStyle = '#ffffff'
       ctx.font = '10px monospace'
@@ -331,13 +333,27 @@ function handleResize() {
   renderChart()
 }
 
+let themeObserver = null
+
 onMounted(() => {
   fetchCandles()
   window.addEventListener('resize', handleResize)
+
+  // Watch for theme change attribute on <html> element
+  themeObserver = new MutationObserver(() => {
+    renderChart()
+  })
+  themeObserver.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['data-theme'],
+  })
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
+  if (themeObserver) {
+    themeObserver.disconnect()
+  }
 })
 </script>
 

@@ -107,8 +107,8 @@ def _build_supply_demand_zones(context: MultiTimeframeContext) -> tuple[list[Lev
     demand_zones = []
 
     for timeframe, data in context.timeframes.items():
-        candles = data.candles
-        if len(candles) < 14:
+        candles = getattr(data, 'candles', None)
+        if candles is None or len(candles) < 14:
             continue
             
         bodies = [abs(c.close - c.open) for c in candles[-14:]]

@@ -114,21 +114,24 @@ async def analyze_market(
     )
 
     try:
+        try:
+            ai_service = AIReasoningService(provider=get_ai_provider())
+        except Exception:
+            logger.exception("AI provider initialization failed; serving deterministic analysis")
+            ai_service = None
+
         result = await analyze_symbol(
             symbol=symbol,
             provider=provider,
-            ai_service=AIReasoningService(
-                provider=get_ai_provider()
-            ),
+            ai_service=ai_service,
             risk_percent=risk_percent,
             count=count,
         )
 
         if result.ai_response.raw and result.ai_response.raw.get("status") == "error":
-            logger.error(f"AI provider returned error status: {result.ai_response.analysis}")
-            raise HTTPException(
-                status_code=502,
-                detail="AI analysis temporarily unavailable",
+            logger.error(
+                "AI provider returned an error; serving deterministic analysis: %s",
+                result.ai_response.analysis,
             )
 
         return _build_response(result)
@@ -141,6 +144,18 @@ async def analyze_market(
             status_code=502,
             detail="AI analysis temporarily unavailable",
         ) from exc
+
+
+def _provider_http_status(exc: Exception) -> int | None:
+    status_code = getattr(exc, "status_code", None)
+    try:
+        status_code = int(status_code)
+    except (TypeError, ValueError):
+        status_code = None
+
+    if status_code in {413, 429, 500, 502, 503, 504}:
+        return status_code
+    return None
 
 
 @router.post(
@@ -217,7 +232,20 @@ async def chat_analysis(
         )
     except Exception as exc:
         logger.exception("Error during AI chat completion")
-        raise HTTPException(status_code=502, detail="AI analysis temporarily unavailable") from exc
+        provider_status = _provider_http_status(exc)
+        if provider_status is not None:
+            if provider_status == 413:
+                detail = "AI provider rejected the request because the payload is too large."
+            elif provider_status == 429:
+                detail = "AI provider rate limit reached. Please wait and retry."
+            else:
+                detail = "AI provider temporarily unavailable."
+            raise HTTPException(status_code=provider_status, detail=detail) from exc
+
+        raise HTTPException(
+            status_code=502,
+            detail="AI analysis temporarily unavailable.",
+        ) from exc
 
     return AnalysisChatResponse(
         symbol=target_symbol,

@@ -92,7 +92,7 @@ def upgrade() -> None:
         sa.Column('ai_provider', sa.String(length=32), nullable=False),
         sa.Column('model_name', sa.String(length=64), nullable=False),
         sa.Column('raw_llm_response', sa.Text(), nullable=False),
-        sa.Column('validated_schema_output', postgresql.JSONB(astext_metadata=True), nullable=True),
+        sa.Column('validated_schema_output', postgresql.JSONB(), nullable=True),
         sa.Column('validation_status', sa.String(length=16), nullable=False),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(['analysis_id'], ['analysis_sessions.id'], ),

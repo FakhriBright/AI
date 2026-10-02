@@ -115,6 +115,47 @@ def _contains_any(text: str, hints: tuple[str, ...]) -> bool:
     return any(hint in text for hint in hints)
 
 
+def _compact_scenarios(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+
+    scenarios = value.get("scenarios")
+    if not isinstance(scenarios, list):
+        return value
+
+    compacted = []
+    for scenario in scenarios:
+        if not isinstance(scenario, dict):
+            continue
+        compacted.append(
+            {
+                key: scenario.get(key)
+                for key in (
+                    "name",
+                    "direction",
+                    "status",
+                    "breakout_status",
+                    "conviction",
+                    "confluence_score",
+                    "trigger_reference",
+                    "invalidation_reference",
+                    "trigger_distance",
+                    "invalidation_distance",
+                    "near_trigger",
+                    "trigger_confirmed",
+                    "rationale",
+                )
+                if key in scenario
+            }
+        )
+
+    return {
+        "symbol": value.get("symbol"),
+        "current_price": value.get("current_price"),
+        "scenarios": compacted,
+    }
+
+
 def select_chat_context(
     ai_context: dict[str, Any],
     message: str,
@@ -176,6 +217,6 @@ def select_chat_context(
         selected["key_levels"] = ai_context["key_levels"]
 
     if include_scenarios and "scenarios" in ai_context:
-        selected["scenarios"] = ai_context["scenarios"]
+        selected["scenarios"] = _compact_scenarios(ai_context["scenarios"])
 
     return selected

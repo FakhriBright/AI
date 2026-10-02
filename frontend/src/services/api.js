@@ -160,14 +160,13 @@ export async function getMarketHealth() {
  * thrown as-is so the UI can show a clear "AI unavailable" state instead of
  * a generated-looking answer built from stale local context.
  */
-export async function sendAnalysisChat(symbol, message, history = [], analysisContext = null) {
+export async function sendAnalysisChat(symbol, message, history = []) {
   return await request(`/analysis/${encodeURIComponent(symbol)}/chat`, {
     method: 'POST',
     body: JSON.stringify({
       symbol,
       message,
       history,
-      analysis_context: analysisContext,
     }),
   })
 }
