@@ -59,6 +59,11 @@ class TimeframeSnapshot:
     structure: StructureSnapshot
     trend: TrendSnapshot
 
+    # CLOSED candles only (oldest first). Deterministic evidence for AI.
+    candles: list = field(default_factory=list)
+    # PatternResult objects from detect_patterns() on the closed candles.
+    patterns: list = field(default_factory=list)
+
 
 @dataclass
 class AnalysisSnapshot:

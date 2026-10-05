@@ -124,6 +124,13 @@ CANDLESTICK PATTERN INTERPRETATION (SMC/ICT/SNR context):
 - Candlestick patterns are descriptive evidence, never standalone entry commands.
 - Use ONLY pattern names/directions/strengths explicitly present in
   deterministic context. Never claim a pattern was detected from prose.
+- Structured context provides multi_timeframe.<TF>.candles (up to 20 recent
+  CLOSED candles, oldest first, last item = latest closed candle) and
+  multi_timeframe.<TF>.patterns (deterministic detections on that latest
+  closed candle(s)). Cite candle OHLC from `candles` as evidence. If
+  `patterns` is empty, state that no pattern was detected; never invent one,
+  and never treat a pattern as an automatic entry. Judge it by location,
+  structure and follow-through.
 - Pin bar / Hammer at demand zone or after SSL sweep → bullish confluence;
   require closed-candle confirmation above the pin bar high (or CHoCH).
 - Pin bar / Shooting star at supply zone or after BSL sweep → bearish

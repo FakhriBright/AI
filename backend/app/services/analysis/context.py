@@ -20,6 +20,10 @@ class TimeframeContext:
     atr14: float | None
     reasons: list[str] = field(default_factory=list)
     swings: list = field(default_factory=list)
+    # Deliberately NOT named `candles`: scenario.py/breakout_classifier read
+    # getattr(tf, "candles", []) and would change scenario behaviour.
+    evidence_candles: list = field(default_factory=list)
+    patterns: list = field(default_factory=list)
 
 
 @dataclass
@@ -51,6 +55,8 @@ def _build_timeframe_context(
     atr14=indicators.atr14,
     reasons=list(trend.reasons),
     swings=list(snapshot.structure.recent_swings),
+    evidence_candles=list(snapshot.candles),
+    patterns=list(snapshot.patterns),
 )
 
 

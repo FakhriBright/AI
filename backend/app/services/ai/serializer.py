@@ -11,6 +11,7 @@ from app.services.analysis.trade_plan import TradePlan
 
 
 AI_SWINGS_PER_TIMEFRAME = 8
+AI_CANDLES_PER_TIMEFRAME = 20
 AI_LEVELS_NEAREST_PER_SIDE = 6
 AI_LEVELS_CONFLUENCE_PER_SIDE = 4
 
@@ -54,6 +55,37 @@ def _compact_swings(swings: list[Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _compact_candles(candles: list[Any]) -> list[dict[str, Any]]:
+    """Last N CLOSED candles (the builder only stores closed ones)."""
+    recent = candles[-AI_CANDLES_PER_TIMEFRAME:]
+
+    return [
+        {
+            "time_utc": _json_safe(candle.time_utc),
+            "open": candle.open,
+            "high": candle.high,
+            "low": candle.low,
+            "close": candle.close,
+            "tick_volume": candle.tick_volume,
+        }
+        for candle in recent
+    ]
+
+
+def _compact_patterns(patterns: list[Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": pattern.name,
+            "direction": pattern.direction,
+            "strength": pattern.strength,
+            "reasons": list(pattern.reasons),
+            "impact": pattern.impact,
+            "confirmation": pattern.confirmation,
+        }
+        for pattern in patterns
+    ]
+
+
 def _compact_timeframe(tf: Any) -> dict[str, Any]:
     return {
         "timeframe": tf.timeframe,
@@ -71,6 +103,12 @@ def _compact_timeframe(tf: Any) -> dict[str, Any]:
         "atr14": tf.atr14,
         "reasons": list(tf.reasons),
         "swings": _compact_swings(tf.swings),
+        "candles": _compact_candles(
+            getattr(tf, "evidence_candles", [])
+        ),
+        "patterns": _compact_patterns(
+            getattr(tf, "patterns", [])
+        ),
     }
 
 

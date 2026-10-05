@@ -7,7 +7,12 @@ from app.services.technical.indicators import ema, rsi, macd, atr
 from app.services.technical.structure import find_swings, classify_structure
 from app.services.technical.trend import analyze_trend
 
-from app.services.analysis.candles import select_analysis_candles, validate_candle_series
+from app.services.analysis.candles import (
+    get_closed_candles,
+    select_analysis_candles,
+    validate_candle_series,
+)
+from app.services.technical.candlestick_patterns import detect_patterns
 from app.services.analysis.snapshot import (
     AnalysisSnapshot,
     IndicatorSnapshot,
@@ -53,6 +58,15 @@ async def build_analysis_snapshot(
                 f"Insufficient candle data for {symbol} {timeframe}: "
                 f"{len(analysis_candles)} candles"
             )
+
+        # Evidence for AI: CLOSED candles only. select_analysis_candles() may
+        # fall back to the raw series (incl. the forming bar), so re-filter.
+        closed_candles = get_closed_candles(analysis_candles, timeframe)
+        detected_patterns = (
+            detect_patterns(closed_candles, at_zone=False)
+            if closed_candles
+            else []
+        )
 
         closes = [c.close for c in analysis_candles]
         highs = [c.high for c in analysis_candles]
@@ -134,6 +148,8 @@ async def build_analysis_snapshot(
             indicators=indicator_snapshot,
             structure=structure_snapshot,
             trend=trend_snapshot,
+            candles=list(closed_candles),
+            patterns=list(detected_patterns),
         )
 
         snapshot.timeframes[timeframe] = timeframe_snapshot
