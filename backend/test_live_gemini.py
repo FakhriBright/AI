@@ -4,7 +4,7 @@ from app.services.ai.reasoning import AIReasoningService
 from app.services.ai.metrics import metrics_collector
 
 
-async def test_live_gemini():
+async def _run_live_gemini():
     try:
         provider = get_ai_provider()
         print(f"Provider initialized: {provider.provider}, model: {provider.model}")
@@ -26,4 +26,4 @@ async def test_live_gemini():
 
 
 if __name__ == "__main__":
-    asyncio.run(test_live_gemini())
+    asyncio.run(_run_live_gemini())

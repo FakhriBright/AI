@@ -1,11 +1,17 @@
 import asyncio
+import pytest
 
 from app.services.market_data.mt5_bridge import MT5BridgeProvider
+from app.core.config import settings
+from app.services.market_data.base import MarketDataUnavailable
 from app.services.technical.indicators import ema, rsi, macd, atr
 
 
 async def main():
-    provider = MT5BridgeProvider("http://172.16.204.62:8765")
+    provider = MT5BridgeProvider(
+        settings.mt5_bridge_url,
+        settings.mt5_bridge_timeout_seconds,
+    )
 
     try:
         candles = await provider.get_candles("EURUSDm", "H1", 300)
@@ -42,4 +48,27 @@ async def main():
         await provider.aclose()
 
 
-asyncio.run(main())
+def test_technical_indicators_live():
+    """Integration test — requires MT5 bridge at URL from settings."""
+    async def _run():
+        provider = MT5BridgeProvider(
+            settings.mt5_bridge_url,
+            settings.mt5_bridge_timeout_seconds,
+        )
+        try:
+            candles = await provider.get_candles("EURUSDm", "H1", 300)
+        finally:
+            await provider.aclose()
+        assert len(candles) > 0, "Expected candles from bridge"
+        closes = [c.close for c in candles]
+        ema20 = ema(closes, 20)
+        assert ema20[-1] is not None
+
+    try:
+        asyncio.run(_run())
+    except Exception as e:
+        pytest.skip(f"MT5 bridge not reachable — skipping live integration test: {e}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

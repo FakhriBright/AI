@@ -76,7 +76,7 @@ def classify_breakout(
             # Let's check if it's a pullback
             # If we were previously way above and now touched it but closed above
             if prev and prev.low >= level:
-                patterns = detect_patterns([current], at_zone=True)
+                patterns = detect_patterns(candles, at_zone=True)
                 bullish_patterns = [p for p in patterns if p.direction == "bullish"]
                 if bullish_patterns:
                     return BreakoutClassification(
@@ -125,7 +125,7 @@ def classify_breakout(
                  
             # Pullback logic
             if prev and prev.high <= level:
-                patterns = detect_patterns([current], at_zone=True)
+                patterns = detect_patterns(candles, at_zone=True)
                 bearish_patterns = [p for p in patterns if p.direction == "bearish"]
                 if bearish_patterns:
                     return BreakoutClassification(

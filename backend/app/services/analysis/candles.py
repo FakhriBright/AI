@@ -65,8 +65,10 @@ class MarketDataInvalid(ValueError):
 def is_market_closure_gap(t1: datetime, t2: datetime) -> bool:
     """
     Returns True if the gap between t1 and t2 represents a normal market closure:
-    1. Weekend closure (Friday close to Sunday/Monday open, <= 72 hours).
-    2. Daily session rollover break (e.g., 21:00 to 22:00 UTC, <= 3 hours).
+    Weekend closure only.
+
+    Intra-session gaps must not be silently accepted merely because they are
+    shorter than a fixed duration.
     """
     gap_sec = (t2 - t1).total_seconds()
     if gap_sec <= 0 or gap_sec > (72 * 3600):
@@ -75,12 +77,8 @@ def is_market_closure_gap(t1: datetime, t2: datetime) -> bool:
     w1 = t1.weekday()
     w2 = t2.weekday()
 
-    # Weekend gap
+    # Weekend gap: Friday/Saturday -> Sunday/Monday.
     if w1 in (3, 4, 5) and w2 in (6, 0):
-        return True
-
-    # Daily session rollover gap (up to 3 hours)
-    if gap_sec <= (3 * 3600):
         return True
 
     return False

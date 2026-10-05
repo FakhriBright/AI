@@ -118,25 +118,28 @@ def test_cache_reuse_does_not_call_provider_twice():
     assert again.analysis == "one"
 
 
-async def test_reasoning_chat_is_single_provider_call():
-    provider = CountingProvider()
-    service = AIReasoningService(provider)
-    context = _sample_context()
+def test_reasoning_chat_is_single_provider_call():
+    async def _run():
+        provider = CountingProvider()
+        service = AIReasoningService(provider)
+        context = _sample_context()
 
-    await service.chat(
-        context,
-        "Kenapa belum ada entry?",
-        history=[
-            {"role": "assistant", "content": "Hello"},
-            {"role": "user", "content": "Kenapa belum ada entry?"},
-        ],
-    )
+        await service.chat(
+            context,
+            "Kenapa belum ada entry?",
+            history=[
+                {"role": "assistant", "content": "Hello"},
+                {"role": "user", "content": "Kenapa belum ada entry?"},
+            ],
+        )
 
-    assert provider.calls == 1
-    prompt = provider.payloads[0]["analysis_prompt"]
-    assert prompt.count("Kenapa belum ada entry?") == 1
-    assert '"symbol":"EURUSDm"' in prompt or '"symbol": "EURUSDm"' in prompt
-    assert "\n  " not in prompt.split("TRADER QUESTION")[0]
+        assert provider.calls == 1
+        prompt = provider.payloads[0]["analysis_prompt"]
+        assert prompt.count("Kenapa belum ada entry?") == 1
+        assert '"symbol":"EURUSDm"' in prompt or '"symbol": "EURUSDm"' in prompt
+        assert "\n  " not in prompt.split("TRADER QUESTION")[0]
+
+    asyncio.run(_run())
 
 
 def test_chat_context_selection_is_deterministic():

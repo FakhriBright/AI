@@ -1,4 +1,5 @@
 import asyncio
+from app.core.config import settings
 
 from app.services.market_data.mt5_bridge import MT5BridgeProvider
 from app.services.analysis.builder import build_analysis_snapshot
@@ -20,7 +21,7 @@ from app.services.analysis.scenario import (
 )
 
 
-BRIDGE_URL = "http://172.16.204.62:8765"
+BRIDGE_URL = settings.mt5_bridge_url
 
 
 async def main():

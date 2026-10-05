@@ -1,13 +1,17 @@
 import asyncio
 
 from app.services.market_data.mt5_bridge import MT5BridgeProvider
+from app.core.config import settings
 from app.services.technical.indicators import ema
 from app.services.technical.structure import find_swings, classify_structure
 from app.services.technical.trend import analyze_trend
 
 
 async def main():
-    provider = MT5BridgeProvider("http://172.16.204.62:8765")
+    provider = MT5BridgeProvider(
+        settings.mt5_bridge_url,
+        settings.mt5_bridge_timeout_seconds,
+    )
 
     try:
         candles = await provider.get_candles(
@@ -56,4 +60,5 @@ async def main():
         await provider.aclose()
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

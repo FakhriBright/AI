@@ -1,5 +1,6 @@
 import asyncio
 import json
+from app.core.config import settings
 
 from app.services.market_data.mt5_bridge import MT5BridgeProvider
 from app.services.analysis.builder import build_analysis_snapshot
@@ -13,7 +14,7 @@ from app.services.analysis.trade_plan import build_trade_plan
 from app.services.ai.serializer import build_ai_context
 
 
-async def test_symbol(provider, symbol):
+async def _run_symbol_test(provider, symbol):
 
     snapshot = await build_analysis_snapshot(
         provider=provider,
@@ -226,7 +227,8 @@ async def test_symbol(provider, symbol):
 async def main():
 
     provider = MT5BridgeProvider(
-        "http://172.16.204.62:8765"
+        settings.mt5_bridge_url,
+        settings.mt5_bridge_timeout_seconds,
     )
 
     try:
@@ -235,7 +237,7 @@ async def main():
             "EURUSDm",
             "XAUUSDm",
         ]:
-            await test_symbol(
+            await _run_symbol_test(
                 provider,
                 symbol,
             )
@@ -244,4 +246,5 @@ async def main():
         await provider.aclose()
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

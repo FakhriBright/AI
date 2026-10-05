@@ -56,19 +56,7 @@ def _add(out, name, direction, strength, reason, confirmation=None):
 
 
 def detect_patterns(candles: list[Candle], at_zone: bool = False) -> list[PatternResult]:
-    """Detect common 1-3 candle patterns. Pass only completed candles, oldest first.
-
-    Patterns included:
-      Single-candle: pin_bar, hammer, inverted_hammer, shooting_star,
-                     doji variants (dragonfly, gravestone, long_legged, four_price),
-                     marubozu, spinning_top
-      Two-candle   : engulfing (bullish/bearish), inside_bar, harami,
-                     piercing_line, dark_cloud_cover, matching_low/high,
-                     tweezer_bottom/top, kicker, belt_hold
-      Three-candle : morning_star, evening_star, morning_doji_star,
-                     evening_doji_star, three_inside_up/down,
-                     three_white_soldiers, three_black_crows
-    """
+    """Detect common 1-3 candle patterns. Pass only completed candles, oldest first."""
     if not candles:
         return []
     out: list[PatternResult] = []
@@ -86,97 +74,77 @@ def detect_patterns(candles: list[Candle], at_zone: bool = False) -> list[Patter
     small = b <= .30 * r
     loc = " at a supplied key zone" if at_zone else ""
 
-    # ─────────────────────────────────────────────────────────────
-    # SINGLE-CANDLE PATTERNS
-    # ─────────────────────────────────────────────────────────────
-
-    # Pin bar / Hammer (bullish wick rejection) — long lower shadow
-    # SMC context: liquidity sweep below key low, then reclaim → entry signal
+    # Single-candle rejection — bullish (lower wick)
     if small and lw >= 2 * max(b, r * .01) and uw <= .35 * r:
         _add(out, "pin_bar", "bullish", "strong" if at_zone else "moderate",
              f"Small body with long lower wick{loc}; lower-shadow liquidity sweep")
         _add(out, "hammer", "bullish", "strong" if at_zone else "moderate",
-             f"Hammer: small body, long lower wick{loc}; suggests demand absorption")
+             f"Hammer: small body, long lower wick{loc}; demand absorption")
 
-    # Pin bar / Shooting star (bearish wick rejection) — long upper shadow
-    # SMC context: liquidity sweep above key high, then rejection → entry signal
+    # Single-candle rejection — bearish (upper wick)
     if small and uw >= 2 * max(b, r * .01) and lw <= .35 * r:
         _add(out, "pin_bar", "bearish", "strong" if at_zone else "moderate",
              f"Long upper wick rejection{loc}; upper-shadow liquidity sweep")
         _add(out, "shooting_star", "bearish", "strong" if at_zone else "moderate",
              f"Shooting star: long upper wick{loc}; supply absorption")
-        # Inverted hammer is same shape but in downtrend → bullish reversal potential
         _add(out, "inverted_hammer", "bullish", "moderate",
              f"Inverted hammer: upper wick in potential reversal zone{loc}")
 
-    # Doji variants — body ≤ 5% of range
+    # Doji variants — body <= 5% of range
     if b <= .05 * r:
         if uw <= .10 * r and lw >= .65 * r:
             _add(out, "dragonfly_doji", "bullish", "moderate",
-                 "Dragonfly doji: long lower shadow, almost no upper wick; bullish rejection")
+                 "Dragonfly doji: long lower shadow; bullish rejection")
         elif lw <= .10 * r and uw >= .65 * r:
             _add(out, "gravestone_doji", "bearish", "moderate",
-                 "Gravestone doji: long upper shadow, almost no lower wick; bearish rejection")
+                 "Gravestone doji: long upper shadow; bearish rejection")
         elif .35 * r <= uw <= .65 * r and .35 * r <= lw <= .65 * r:
             _add(out, "long_legged_doji", "neutral", "moderate",
-                 "Long-legged doji: balanced two-sided shadows; strong indecision at zone")
+                 "Long-legged doji: balanced two-sided shadows; strong indecision")
         else:
             _add(out, "doji", "neutral", "weak",
-                 "Doji: open ≈ close; indecision, wait for directional close")
+                 "Doji: open ≈ close; indecision")
 
-    # Four-price doji — extremely compressed
     if b <= .08 * r and uw <= .08 * r and lw <= .08 * r:
         _add(out, "four_price_doji", "neutral", "weak",
-             "Four-price doji: OHLC near one price; ultra-compressed indecision")
+             "Four-price doji: OHLC compressed to nearly one price")
 
-    # Marubozu — full-body candle, almost no wicks
-    # SMC context: strong displacement / order-block creation candle
     if b >= .88 * r:
         dir_ = "bullish" if _bull(c) else "bearish" if _bear(c) else "neutral"
         _add(out, "marubozu", dir_, "strong",
-             f"Marubozu: body dominates range; strong {'bullish' if dir_=='bullish' else 'bearish'} displacement")
+             f"Marubozu: body dominates range; strong {dir_} displacement")
 
-    # Spinning top — small body, equal wicks
     if .10 * r < b <= .35 * r and uw >= .20 * r and lw >= .20 * r:
         _add(out, "spinning_top", "neutral", "weak",
-             "Spinning top: small body with balanced wicks; indecision within range")
+             "Spinning top: small body, balanced wicks; indecision")
 
-    # ─────────────────────────────────────────────────────────────
-    # TWO-CANDLE PATTERNS
-    # ─────────────────────────────────────────────────────────────
     if p:
         pr = _rng(p)
         pb = _body(p)
 
-        # Inside bar — current range fully within prior range
-        # SMC context: consolidation after impulse, often precedes BOS
         if c.high <= p.high and c.low >= p.low:
             _add(out, "inside_bar", "neutral", "moderate",
-                 "Inside bar: current range within prior; compression before BOS/CHoCH",
-                 "Wait for a closed breakout above/below the mother bar; wick-only breach is not confirmation.")
+                 "Inside bar: consolidation within mother bar; watch for BOS/CHoCH",
+                 "Wait for a closed breakout; wick-only breach is not confirmation.")
 
-        # Engulfing — strong displacement / order-flow shift
-        # SMC/ICT: marks an order block (OB) formation; used for entry after retest
         if _bull(c) and _bear(p) and c.open <= p.close and c.close >= p.open and b >= pb:
             _add(out, "bullish_engulfing", "bullish", "strong" if at_zone else "moderate",
-                 f"Bullish engulfing: body engulfs prior bearish candle{loc}; potential OB / demand zone")
+                 f"Bullish engulfing{loc}; potential demand OB")
             _add(out, "engulfing", "bullish", "strong" if at_zone else "moderate",
                  f"Bullish engulfing body{loc}")
 
         if _bear(c) and _bull(p) and c.open >= p.close and c.close <= p.open and b >= pb:
             _add(out, "bearish_engulfing", "bearish", "strong" if at_zone else "moderate",
-                 f"Bearish engulfing: body engulfs prior bullish candle{loc}; potential OB / supply zone")
+                 f"Bearish engulfing{loc}; potential supply OB")
             _add(out, "engulfing", "bearish", "strong" if at_zone else "moderate",
                  f"Bearish engulfing body{loc}")
 
-        # Harami — small body inside prior body; indecision after impulse
         if pb > 0 and b < pb * .60 and min(c.open, c.close) >= min(p.open, p.close) and max(c.open, c.close) <= max(p.open, p.close):
             name = "bullish_harami" if _bear(p) else "bearish_harami" if _bull(p) else "harami"
             dir_ = "bullish" if _bear(p) else "bearish" if _bull(p) else "neutral"
             _add(out, name, dir_, "moderate",
-                 "Harami: small body inside prior candle; momentum pause, watch for follow-through")
+                 "Harami: small body inside prior; momentum pause")
 
-        # Piercing line / Dark cloud cover
         if _bull(c) and _bear(p) and c.open < p.low and c.close > _mid(p) and c.close < p.open:
             _add(out, "piercing_line", "bullish", "moderate",
                  "Piercing line: bullish close > midpoint of prior bearish body")
@@ -184,31 +152,27 @@ def detect_patterns(candles: list[Candle], at_zone: bool = False) -> list[Patter
             _add(out, "dark_cloud_cover", "bearish", "moderate",
                  "Dark cloud cover: bearish close < midpoint of prior bullish body")
 
-        # Matching lows / highs — SNR / double-bottom / double-top confirmation
         if abs(c.low - p.low) <= .10 * max(pr, r) and _bear(p) and _bull(c):
             _add(out, "matching_low", "bullish", "weak",
-                 "Matching lows: two lows align with direction change; potential double-bottom / SNR")
+                 "Matching lows: potential double-bottom / SNR demand")
         if abs(c.high - p.high) <= .10 * max(pr, r) and _bull(p) and _bear(c):
             _add(out, "matching_high", "bearish", "weak",
-                 "Matching highs: two highs align with direction change; potential double-top / SNR")
+                 "Matching highs: potential double-top / SNR supply")
 
-        # Tweezer bottom / top — SNR equal-wick rejection
         if abs(c.low - p.low) <= .08 * max(pr, r):
             _add(out, "tweezer_bottom", "bullish", "moderate",
-                 "Tweezer bottom: consecutive equal lows; double-test of demand / SNR support")
+                 "Tweezer bottom: equal lows; double-test of demand / SNR support")
         if abs(c.high - p.high) <= .08 * max(pr, r):
             _add(out, "tweezer_top", "bearish", "moderate",
-                 "Tweezer top: consecutive equal highs; double-test of supply / SNR resistance")
+                 "Tweezer top: equal highs; double-test of supply / SNR resistance")
 
-        # Kicker — strong directional shift (gap in stocks; body gap in FX)
         if _bull(c) and _bear(p) and c.open >= p.open and c.close >= p.close and abs(c.open - p.open) <= .10 * max(pr, r):
             _add(out, "bullish_kicker", "bullish", "moderate",
-                 "Bullish kicker: sharp directional reversal upward; FX gap may be absent")
+                 "Bullish kicker: sharp upward shift; FX gap may be absent")
         if _bear(c) and _bull(p) and c.open <= p.open and c.close <= p.close and abs(c.open - p.open) <= .10 * max(pr, r):
             _add(out, "bearish_kicker", "bearish", "moderate",
-                 "Bearish kicker: sharp directional reversal downward; FX gap may be absent")
+                 "Bearish kicker: sharp downward shift; FX gap may be absent")
 
-        # Belt hold — strong open-to-close momentum
         if _bull(c) and _bear(p) and abs(c.open - p.close) <= .08 * max(pr, r) and c.close > p.high:
             _add(out, "bullish_belt_hold", "bullish", "moderate",
                  "Bullish belt hold: opens near prior close, drives above prior high")
@@ -216,49 +180,38 @@ def detect_patterns(candles: list[Candle], at_zone: bool = False) -> list[Patter
             _add(out, "bearish_belt_hold", "bearish", "moderate",
                  "Bearish belt hold: opens near prior close, drives below prior low")
 
-    # ─────────────────────────────────────────────────────────────
-    # THREE-CANDLE PATTERNS
-    # ─────────────────────────────────────────────────────────────
     if pp and p:
         mid_small = _body(p) <= .35 * max(_rng(p), 1e-12)
 
-        # Morning star / Evening star — HTF reversal confirmation
         if _bear(pp) and mid_small and _bull(c) and c.close > _mid(pp):
             _add(out, "morning_star", "bullish", "strong" if at_zone else "moderate",
-                 "Morning star: bearish impulse → pause → bullish recovery past midpoint; HTF reversal")
+                 "Morning star: bearish → pause → bullish recovery; HTF reversal signal")
         if _bull(pp) and mid_small and _bear(c) and c.close < _mid(pp):
             _add(out, "evening_star", "bearish", "strong" if at_zone else "moderate",
-                 "Evening star: bullish impulse → pause → bearish recovery past midpoint; HTF reversal")
-
-        # Doji star variants
+                 "Evening star: bullish → pause → bearish recovery; HTF reversal signal")
         if _bear(pp) and mid_small and _bull(c) and _body(p) <= .10 * max(_rng(p), 1e-12):
             _add(out, "morning_doji_star", "bullish", "moderate",
-                 "Morning doji star: doji middle candle strengthens morning star reversal")
+                 "Morning doji star: doji middle strengthens reversal")
         if _bull(pp) and mid_small and _bear(c) and _body(p) <= .10 * max(_rng(p), 1e-12):
             _add(out, "evening_doji_star", "bearish", "moderate",
-                 "Evening doji star: doji middle candle strengthens evening star reversal")
+                 "Evening doji star: doji middle strengthens reversal")
 
-        # Three inside up / down — harami confirmed by third candle
         if _bear(pp) and _bull(p) and _bull(c) and p.open < pp.close and p.close > pp.open and c.close > p.close:
             _add(out, "three_inside_up", "bullish", "moderate",
-                 "Three inside up: harami pause confirmed by bullish close; CHoCH / reversal")
+                 "Three inside up: harami confirmed by bullish close; CHoCH signal")
 
         if _bull(pp) and _bear(p) and _bear(c) and p.open > pp.close and p.close < pp.open and c.close < pp.close:
             _add(out, "three_inside_down", "bearish", "moderate",
-                 "Three inside down: harami pause confirmed by bearish close; CHoCH / reversal")
+                 "Three inside down: harami confirmed by bearish close; CHoCH signal")
 
-        # Three white soldiers / Three black crows — strong trend continuation
-        # SMC context: displacement sequence; confirms order flow in trend direction
         if _bull(pp) and _bull(p) and _bull(c) and pp.close < p.close < c.close and pp.open < p.open < c.open:
             _add(out, "three_white_soldiers", "bullish", "moderate",
-                 "Three white soldiers: three rising bullish bodies; strong bullish order flow; beware overextension")
+                 "Three white soldiers: three rising bullish bodies; strong order flow; beware overextension")
         if _bear(pp) and _bear(p) and _bear(c) and pp.close > p.close > c.close and pp.open > p.open > c.open:
             _add(out, "three_black_crows", "bearish", "moderate",
-                 "Three black crows: three falling bearish bodies; strong bearish order flow; beware overextension")
+                 "Three black crows: three falling bearish bodies; strong order flow; beware overextension")
 
-    # ─────────────────────────────────────────────────────────────
     # Deduplicate: keep first occurrence per (name, direction) pair
-    # ─────────────────────────────────────────────────────────────
     seen: set = set()
     unique: list[PatternResult] = []
     for item in out:

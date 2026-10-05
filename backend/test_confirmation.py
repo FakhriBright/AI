@@ -1,6 +1,9 @@
 import asyncio
+import pytest
 
 from app.services.market_data.mt5_bridge import MT5BridgeProvider
+from app.core.config import settings
+from app.services.market_data.base import MarketDataUnavailable
 from app.services.analysis.builder import build_analysis_snapshot
 from app.services.analysis.context import build_multi_timeframe_context
 from app.services.analysis.bias import build_market_bias
@@ -10,7 +13,10 @@ from app.services.analysis.confirmation import confirm_scenario
 from app.services.analysis.candles import get_closed_candles
 
 async def main():
-    provider = MT5BridgeProvider("http://172.16.204.62:8765")
+    provider = MT5BridgeProvider(
+        settings.mt5_bridge_url,
+        settings.mt5_bridge_timeout_seconds,
+    )
 
     try:
         symbol = "EURUSDm"
@@ -163,4 +169,39 @@ async def main():
         await provider.aclose()
 
 
-asyncio.run(main())
+
+def test_confirmation_live():
+    """Integration test — requires MT5 bridge at URL from settings."""
+    async def _run():
+        provider = MT5BridgeProvider(
+            settings.mt5_bridge_url,
+            settings.mt5_bridge_timeout_seconds,
+        )
+        symbol = "EURUSDm"
+        try:
+            snapshot = await build_analysis_snapshot(provider=provider, symbol=symbol, count=300)
+        finally:
+            await provider.aclose()
+
+        context = build_multi_timeframe_context(snapshot)
+        bias = build_market_bias(context)
+        levels = build_key_levels(context)
+        analysis = build_scenarios(context=context, bias=bias, levels=levels)
+        assert len(analysis.scenarios) > 0, "Expected at least one scenario"
+
+        for scenario in analysis.scenarios:
+            result = confirm_scenario(
+                context=context,
+                scenario=scenario,
+                latest_open=levels.current_price,
+                latest_high=levels.current_price * 1.001,
+                latest_low=levels.current_price * 0.999,
+                latest_close=levels.current_price,
+            )
+            assert result.confirmed in (True, False)
+
+    asyncio.run(_run())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

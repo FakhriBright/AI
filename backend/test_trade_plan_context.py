@@ -1,6 +1,7 @@
 import asyncio
 
 from app.services.market_data.mt5_bridge import MT5BridgeProvider
+from app.core.config import settings
 from app.services.analysis.builder import build_analysis_snapshot
 from app.services.analysis.context import build_multi_timeframe_context
 from app.services.analysis.bias import build_market_bias
@@ -246,7 +247,8 @@ async def test_symbol(provider, symbol):
 async def main():
 
     provider = MT5BridgeProvider(
-        "http://172.16.204.62:8765"
+        settings.mt5_bridge_url,
+        settings.mt5_bridge_timeout_seconds,
     )
 
     try:
@@ -266,4 +268,5 @@ async def main():
         await provider.aclose()
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

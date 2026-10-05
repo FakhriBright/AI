@@ -46,7 +46,7 @@ bullish = calculate_stop(
         direction="bullish",
         entry_price=1.14735,
         trigger_reference=1.14725,
-        invalidation_reference=None,
+        invalidation_reference=1.14705,
         atr_reference=0.00030,
     )
 )

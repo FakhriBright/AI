@@ -141,7 +141,7 @@ def build_scenarios(
     atr_intraday = _get_entry_atr(context, ("H1", "M15"))
     atr_scalp = _get_entry_atr(context, ("M5", "M15", "M1"))
     
-    candles_m15 = context.timeframes["M15"].candles if "M15" in context.timeframes else []
+    candles_m15 = getattr(context.timeframes.get("M15"), "candles", [])
 
     intraday_scenarios = []
     scalp_scenarios = []

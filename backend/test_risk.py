@@ -1,11 +1,15 @@
 import asyncio
+from app.core.config import settings
 
 from app.services.market_data.mt5_bridge import MT5BridgeProvider
 from app.services.analysis.risk import RiskRequest, calculate_risk
 
 
 async def main():
-    provider = MT5BridgeProvider("http://172.16.204.62:8765")
+    provider = MT5BridgeProvider(
+        settings.mt5_bridge_url,
+        settings.mt5_bridge_timeout_seconds,
+    )
 
     try:
         symbol = "XAUUSDm"
@@ -50,4 +54,5 @@ async def main():
         await provider.aclose()
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

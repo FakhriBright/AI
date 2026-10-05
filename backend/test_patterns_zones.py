@@ -15,21 +15,37 @@ def create_candle(o: float, h: float, l: float, c: float) -> Candle:
 
 def test_pin_bar():
     # Bullish pin bar: small body, long lower wick
+    # New design: pin_bar and hammer are both emitted for the same wick shape
     c = create_candle(1.050, 1.055, 1.010, 1.052)
     patterns = detect_patterns([c], at_zone=True)
-    assert len(patterns) == 1
-    assert patterns[0].name == "pin_bar"
-    assert patterns[0].direction == "bullish"
-    assert patterns[0].strength == "strong"
+    names = [p.name for p in patterns]
+    dirs = {p.name: p.direction for p in patterns}
+    strengths = {p.name: p.strength for p in patterns}
+    # Must include pin_bar with correct direction and strength
+    assert "pin_bar" in names, f"pin_bar not found in {names}"
+    assert dirs["pin_bar"] == "bullish"
+    assert strengths["pin_bar"] == "strong"
+    # hammer is now also emitted for the same shape
+    assert "hammer" in names, f"hammer not found in {names}"
+    assert dirs["hammer"] == "bullish"
+    # All patterns must be bullish (lower-wick candle)
+    for p in patterns:
+        assert p.direction in ("bullish", "neutral"), f"Unexpected bearish pattern: {p.name}"
 
 def test_engulfing():
-    c1 = create_candle(1.050, 1.055, 1.045, 1.048) # Bearish
-    c2 = create_candle(1.045, 1.060, 1.040, 1.055) # Bullish, engulfing body
+    c1 = create_candle(1.050, 1.055, 1.045, 1.048)  # Bearish
+    c2 = create_candle(1.045, 1.060, 1.040, 1.055)  # Bullish, engulfing body
     patterns = detect_patterns([c1, c2], at_zone=False)
-    assert len(patterns) == 1
-    assert patterns[0].name == "engulfing"
-    assert patterns[0].direction == "bullish"
-    assert patterns[0].strength == "moderate"
+    names = [p.name for p in patterns]
+    dirs = {p.name: p.direction for p in patterns}
+    # bullish_engulfing and engulfing are both emitted for the same formation
+    assert "bullish_engulfing" in names, f"bullish_engulfing not found in {names}"
+    assert dirs["bullish_engulfing"] == "bullish"
+    assert "engulfing" in names, f"engulfing not found in {names}"
+    assert dirs["engulfing"] == "bullish"
+    # All engulfing-family patterns must be bullish
+    for p in patterns:
+        assert p.direction in ("bullish", "neutral"), f"Unexpected direction for {p.name}: {p.direction}"
 
 def test_breakout_classifier():
     c1 = create_candle(1.040, 1.045, 1.035, 1.042)

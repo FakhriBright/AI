@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+from app.core.config import settings
 
 from app.services.market_data.mt5_bridge import MT5BridgeProvider
 from app.services.technical.indicators import ema, rsi, macd, atr
@@ -142,7 +143,8 @@ async def build_analysis_snapshot(
 
 async def main():
     provider = MT5BridgeProvider(
-        "http://172.16.204.62:8765"
+        settings.mt5_bridge_url,
+        settings.mt5_bridge_timeout_seconds,
     )
 
     try:
