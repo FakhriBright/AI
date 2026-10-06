@@ -334,7 +334,11 @@ def killzone(generated_at: Any) -> dict[str, Any] | None:
         ("NY PM", 13 * 60 + 30, 16 * 60),
     )
     active = next((n for n, a, b in windows if a <= minutes < b), None)
-    return {"ny_time": ny.strftime("%H:%M"), "active": active}
+    return {
+        "ny_time": ny.strftime("%H:%M"),
+        "active": active,
+        "in_killzone": active is not None,
+    }
 
 
 def premium_discount(swings: list[Any], price: float | None) -> dict[str, Any] | None:
@@ -346,12 +350,18 @@ def premium_discount(swings: list[Any], price: float | None) -> dict[str, Any] |
     if hi <= lo:
         return None
     pos = (price - lo) / (hi - lo)
-    state = "premium" if pos > 0.55 else "discount" if pos < 0.45 else "equilibrium"
+    if pos > 1 or pos < 0:
+        # price already left the swing range (structure broke): no P/D read
+        state = "outside_range"
+    else:
+        state = "premium" if pos > 0.55 else "discount" if pos < 0.45 else "equilibrium"
     return {
         "range": [_r(lo), _r(hi)],
         "eq": _r((hi + lo) / 2),
         "pos": _r(pos, 2),
         "state": state,
+        # discount = murah = area beli; premium = mahal = area jual
+        "favors": {"discount": "buy", "premium": "sell"}.get(state, "netral"),
     }
 
 
@@ -499,9 +509,35 @@ def build_entry_gate(ai_context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_setups(ai_context: dict[str, Any]) -> list[dict[str, Any]]:
-    """Conditional setups from existing scenario + key level fields only."""
+def _pattern_side(
+    reads: list[dict[str, Any]] | None, direction: str
+) -> tuple[list[str], list[str]]:
+    """Pattern evidence that supports / opposes a setup direction."""
+    pro: list[str] = []
+    con: list[str] = []
+    for block in reads or []:
+        for pat in block.get("patterns", []):
+            if pat.get("dir") not in ("bullish", "bearish"):
+                continue
+            label = f"{block.get('tf')} {pat['family']} [{'+'.join(pat['names'][:2])}]"
+            (pro if pat["dir"] == direction else con).append(label)
+    return pro[:3], con[:3]
+
+
+def build_setups(
+    ai_context: dict[str, Any],
+    reads: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Conditional setups from existing scenario + key level fields only.
+
+    Two reward/risk views are precomputed so the LLM never has to do math:
+    - rr_at_ref : entering at entry_ref (pending order at the trigger level)
+    - now_*     : entering at the current market price
+    """
     levels = _as_dict(ai_context.get("key_levels"))
+    price = _num(levels.get("current_price"))
+    if price is None:
+        price = _num(_as_dict(ai_context.get("scenarios")).get("current_price"))
     out: list[dict[str, Any]] = []
 
     for sc in _scenario_items(ai_context):
@@ -518,35 +554,69 @@ def build_setups(ai_context: dict[str, Any]) -> list[dict[str, Any]]:
         if direction == "bullish" and stop >= entry:
             continue
 
+        # A target closer than half the risk (or half an ATR) is noise, not a
+        # target: skip such levels and take the next one.
+        atr = _num(sc.get("atr_reference"))
+        min_gap = max(0.5 * risk, 0.5 * atr if atr else 0.0)
+
         target: float | None = None
         if direction == "bearish":
             pool = [
                 _num(_as_dict(l).get("price")) for l in levels.get("supports") or []
             ]
-            pool = [p for p in pool if p is not None and p < entry - 0.1 * risk]
+            pool = [p for p in pool if p is not None and p <= entry - min_gap]
             target = max(pool) if pool else None
         else:
             pool = [
                 _num(_as_dict(l).get("price")) for l in levels.get("resistances") or []
             ]
-            pool = [p for p in pool if p is not None and p > entry + 0.1 * risk]
+            pool = [p for p in pool if p is not None and p >= entry + min_gap]
             target = min(pool) if pool else None
 
-        rr = _r(abs(target - entry) / risk, 2) if target is not None else None
-        out.append(
-            {
-                "scenario": sc.get("name"),
-                "mode": sc.get("mode"),
-                "dir": direction,
-                "conviction": sc.get("conviction"),
-                "confirmed": bool(sc.get("trigger_confirmed")),
-                "trigger_dist_atr": _r(sc.get("trigger_distance_atr"), 2),
-                "entry_ref": _r(entry),
-                "stop_ref": _r(stop),
-                "target_ref": _r(target),
-                "rr": rr,
-            }
-        )
+        rr_ref = _r(abs(target - entry) / risk, 2) if target is not None else None
+
+        setup: dict[str, Any] = {
+            "scenario": sc.get("name"),
+            "mode": sc.get("mode"),
+            "dir": direction,
+            "conviction": sc.get("conviction"),
+            "confirmed": bool(sc.get("trigger_confirmed")),
+            "trigger_dist_atr": _r(sc.get("trigger_distance_atr"), 2),
+            "entry_ref": _r(entry),
+            "stop_ref": _r(stop),
+            "target_ref": _r(target),
+            "rr_at_ref": rr_ref,
+        }
+
+        # Market-entry view (entry = current price, same SL and TP).
+        if price is not None:
+            if direction == "bearish":
+                now_risk = stop - price
+                now_reward = price - target if target is not None else None
+            else:
+                now_risk = price - stop
+                now_reward = target - price if target is not None else None
+
+            setup["now_entry"] = _r(price)
+            if now_risk <= 0:
+                setup["now_note"] = "harga sudah melewati stop_ref; setup ini tidak valid untuk entry sekarang"
+            elif target is None:
+                setup["now_risk"] = _r(now_risk)
+                setup["now_note"] = "tidak ada target level yang layak"
+            elif now_reward is None or now_reward <= 0:
+                setup["now_risk"] = _r(now_risk)
+                setup["now_note"] = "harga sudah melewati target_ref"
+            else:
+                setup["now_risk"] = _r(now_risk)
+                setup["now_reward"] = _r(now_reward)
+                setup["now_rr"] = _r(now_reward / now_risk, 2)
+
+        pro, con = _pattern_side(reads, direction)
+        if pro:
+            setup["patterns_for"] = pro
+        if con:
+            setup["patterns_against"] = con
+        out.append(setup)
 
     out.sort(
         key=lambda s: (
@@ -695,8 +765,11 @@ def build_desk_brief(ai_context: dict[str, Any]) -> dict[str, Any]:
         "structure": structure,
         "ict": ict,
         "entry_gate": build_entry_gate(ai_context),
-        "setups": build_setups(ai_context),
-        "setups_note": "Referensi dari level/scenario engine, BUKAN trade plan terkonfirmasi.",
+        "setups": build_setups(ai_context, reads),
+        "setups_note": (
+            "Referensi dari level/scenario engine, BUKAN trade plan terkonfirmasi. "
+            "rr_at_ref = entry di entry_ref; now_* = entry di harga sekarang."
+        ),
         "unavailable": ["FVG", "order block eksplisit", "fundamental/news"],
         "desks": desks,
     }
