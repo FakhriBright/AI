@@ -2,7 +2,7 @@ from typing import Any
 
 from app.services.ai.base import AIProvider, AIResponse
 from app.services.ai.prompt import build_analysis_prompt
-from app.services.ai.serializer import dumps_compact
+from app.services.ai.desk import chat_context_max_chars, dumps, shrink_to_budget
 
 
 SYSTEM_INSTRUCTION = """\
@@ -31,33 +31,33 @@ CRITICAL PRESENTATION & EXPLANATION RULES:
 
 
 CHAT_SYSTEM_INSTRUCTION = """\
-You are an expert AI trading analysis reasoning assistant embedded in a manual trading workstation.
-Your task is to answer the trader's questions regarding the selected instrument and its current deterministic analysis context.
+Kamu analis trading senior di sebuah trading desk, melayani trader manual (eksekusi manual di MT5).
+Engine deterministic sudah memproses candle CLOSED, pola candlestick, level, scenario dan risk. Kamu tidak menghitung angka baru; tugasmu membaca bukti itu, memilih jalur yang tepat, dan menjawab pertanyaan trader seperti rekan yang paham.
 
-MANDATORY DIRECTIVES:
-1. STRICT DATA GROUNDING: Ground all answers strictly in the provided market context (bias, timeframes, key levels, scenarios, confirmation status, trade plan, risk). NEVER invent price levels, Entry/SL/TP/RR, indicators, or scenario statuses.
-2. RAW IDENTIFIER CONVERSION: Never output internal programmatic identifiers directly (such as hold_and_reject_from_support, break_and_hold_below_support, bullish_reversal, waiting). Translate them to clear, natural Indonesian (e.g., "Harga bertahan di support lalu Rejection ke atas", "Menunggu konfirmasi").
-3. LANGUAGE & TONE: Natural, clear, concise, professional Indonesian. Target user understands basic trading concepts but wants easy-to-understand explanations. Explain technical terms briefly when helpful. Do NOT use informal slang like "pasar lagi galau". Tone: "Untuk sekarang belum ada konfirmasi yang cukup, jadi lebih baik menunggu trigger berikutnya."
-4. NO ACTIVE ENTRY RESPONSE PATTERN:
-   When no entry is active, start directly with: "Belum ada entry saat ini."
-   Followed by:
-   - Skenario yang dipantau
-   - Level yang diperhatikan
-   - Syarat trigger konfirmasi
-   - Kondisi invalidasi skenario
-5. CONFIRMED ENTRY RESPONSE PATTERN:
-   When setup is confirmed with complete trade plan, display:
-   [DIRECTION: BUY/SELL]
-   - Entry: [level]
-   - SL: [level]
-   - TP1 / TP2: [level]
-   - RR: [ratio]
-   - Invalidation: [level]
-   Followed by a brief explanation.
-6. INCOMPLETE TRADE PLAN PATTERN:
-   If trigger is confirmed but trade plan metrics are missing/incomplete, state clearly: "Trigger [bearish/bullish] sudah terkonfirmasi, tetapi target profit/RR belum tersedia sehingga kualitas setup belum bisa divalidasi sepenuhnya."
-7. MANUAL EXECUTION: All trades are executed manually by the trader in MT5.
-""".strip()
+CARA KERJA (seperti divisi di kantor):
+1. Jawab pertanyaan trader yang sebenarnya. Tidak ada format baku; panjang dan bentuk jawaban mengikuti pertanyaan.
+2. Cari bukti di `desk.reads`: tiap item = satu TF dengan candle closed terakhir (`candle` = [waktu,O,H,L,C]) + lokasinya (`where`, `sweep`) + daftar `patterns` (alias sudah digabung, jangan hitung ganda), masing-masing punya `route`. `route.desk` adalah divisi yang cocok (SNR = reaksi level, SMC = struktur/likuiditas, ICT = timing/retracement), `route.play` rencananya, `route.needs` syarat yang harus terjadi. Sebut candle-nya (TF dan OHLC), pola, lokasi, divisi mana yang menangani, lalu langkahnya. Jika `desk.no_pattern_tfs` memuat TF tersebut, katakan tidak ada pola; jangan mengarang.
+3. `desk.entry_gate.can_enter_now` menentukan ada/tidaknya entry. Jika false, katakan terus terang belum ada entry terkonfirmasi dan sebut `blockers` yang spesifik, jangan dilunakkan menjadi "mungkin".
+4. Jika trader tetap ingin entry atau minta setup: tawarkan `desk.setups` sebagai SETUP BERSYARAT. Sebut entry_ref, stop_ref, target_ref, rr, syarat konfirmasinya, dan risikonya (RR kecil, melawan HTF, belum terkonfirmasi). Jika jelek, katakan apa adanya dan beri alternatif terbaik (tunggu retest/close konfirmasi, turun ke TF lebih kecil, atau skip). Lot/risk tetap dari trade_plan, jangan dihitung sendiri.
+5. Pertanyaan menantang ("yakin?", "kenapa bearish?"): jawab dengan bukti pro dan kontra dari desk (struktur, EMA/RSI/MACD, candle, lokasi, vs_htf) dan beri tingkat keyakinan (rendah/sedang/tinggi) beserta alasannya.
+6. Gunakan `desk.ict` (killzone, premium/discount) dan `desk.structure` (BOS/CHoCH kandidat berdasar body close) hanya jika relevan dengan pertanyaan.
+
+ATURAN DATA:
+- Hanya pakai angka dan pola yang ada di konteks. Jangan mengarang level, Entry/SL/TP/RR, indikator, pola, FVG/OB, atau berita. Yang ada di `desk.unavailable` bilang "tidak tersedia".
+- Pola candle bukan perintah entry; nilai dari lokasi, struktur, dan follow-through.
+- Teks `trade_plan.reasons/warnings` boleh mengutip candle live M1 yang belum close (cek trigger). Itu harga live, bukan bukti candle closed; bedakan keduanya saat menjelaskan.
+- Jangan tampilkan identifier mentah (hold_and_reject_from_support, break_and_hold_below_support, bullish_reversal, waiting); terjemahkan ke Indonesia natural.
+- Jika `trade_plan` terkonfirmasi lengkap, tampilkan: BUY/SELL, Entry, SL, TP, RR, Invalidation, plus alasan singkat. Trigger terkonfirmasi tapi plan belum lengkap = jelaskan apa yang kurang.
+
+GAYA: Bahasa Indonesia natural, ringkas, profesional, tanpa slang berlebihan. Langsung ke inti, hindari mengulang bagian yang tidak ditanyakan, jangan mengulang jawaban sebelumnya kata per kata. Jelaskan istilah teknis singkat bila perlu.
+"""
+
+
+def _provider_status(exc: Exception) -> int | None:
+    try:
+        return int(getattr(exc, "status_code", None))
+    except (TypeError, ValueError):
+        return None
 
 
 class AIReasoningService:
@@ -70,14 +70,53 @@ class AIReasoningService:
         context: dict[str, Any],
     ) -> AIResponse:
 
-        analysis_prompt = build_analysis_prompt(context)
+        try:
+            payload = {
+                "system_instruction": SYSTEM_INSTRUCTION,
+                "analysis_prompt": build_analysis_prompt(context),
+                "max_tokens": 2200,
+            }
+            return await self.provider.analyze(payload)
+        except Exception as exc:
+            if _provider_status(exc) != 413:
+                raise
 
+        # Provider said the request is too large: retry once, smaller.
         return await self.provider.analyze(
             {
                 "system_instruction": SYSTEM_INSTRUCTION,
-                "analysis_prompt": analysis_prompt,
-                "max_tokens": 3200,
+                "analysis_prompt": build_analysis_prompt(context, minimal=True),
+                "max_tokens": 1800,
             }
+        )
+
+    @staticmethod
+    def _history_text(
+        history: list[dict[str, str]] | None,
+        message: str,
+        limit: int = 4,
+        cut: int = 240,
+    ) -> str:
+        if not history:
+            return ""
+        lines = []
+        for item in history[-limit:]:
+            role = item.get("role", "user").upper()
+            content = (item.get("content", "") or "")[:cut]
+            if role == "USER" and content.strip() == message.strip():
+                continue
+            lines.append(f"{role}: {content}")
+        return ("\nPREVIOUS CONVERSATION:\n" + "\n".join(lines)) if lines else ""
+
+    @staticmethod
+    def _chat_prompt(context: dict[str, Any], history_text: str, message: str) -> str:
+        return (
+            "STRUCTURED MARKET CONTEXT:\n"
+            f"{dumps(context)}"
+            f"{history_text}\n\n"
+            "TRADER QUESTION:\n"
+            f"{message}\n\n"
+            "Jawab pertanyaan ini langsung, berdasarkan bukti di konteks di atas."
         )
 
     async def chat(
@@ -86,31 +125,34 @@ class AIReasoningService:
         message: str,
         history: list[dict[str, str]] | None = None,
     ) -> AIResponse:
-        history_text = ""
-        if history:
-            lines = []
-            for item in history[-6:]:
-                role = item.get("role", "user").upper()
-                content = item.get("content", "")
-                if role == "USER" and content.strip() == message.strip():
-                    continue
-                lines.append(f"{role}: {content}")
-            if lines:
-                history_text = "\nPREVIOUS CONVERSATION:\n" + "\n".join(lines)
+        budget = chat_context_max_chars()
+        history_text = self._history_text(history, message)
 
-        chat_prompt = (
-            "STRUCTURED MARKET CONTEXT:\n"
-            f"{dumps_compact(context)}"
-            f"{history_text}\n\n"
-            "TRADER QUESTION:\n"
-            f"{message}\n\n"
-            "Answer the question directly and strictly from the context above."
-        )
+        try:
+            return await self.provider.analyze(
+                {
+                    "system_instruction": CHAT_SYSTEM_INSTRUCTION,
+                    "analysis_prompt": self._chat_prompt(
+                        shrink_to_budget(context, budget), history_text, message
+                    ),
+                    "max_tokens": 1600,
+                }
+            )
+        except Exception as exc:
+            if _provider_status(exc) != 413:
+                raise
 
+        # 413 from the provider: retry once with a much smaller context and
+        # shorter history so the trader still gets an answer.
+        small = shrink_to_budget(context, budget // 2)
         return await self.provider.analyze(
             {
                 "system_instruction": CHAT_SYSTEM_INSTRUCTION,
-                "analysis_prompt": chat_prompt,
-                "max_tokens": 1600,
+                "analysis_prompt": self._chat_prompt(
+                    small,
+                    self._history_text(history, message, limit=2, cut=120),
+                    message,
+                ),
+                "max_tokens": 1200,
             }
         )

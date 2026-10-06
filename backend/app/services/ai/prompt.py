@@ -1,17 +1,16 @@
 from typing import Any
 
-from app.services.ai.serializer import dumps_compact
+from app.services.ai.desk import (
+    analysis_context_max_chars,
+    build_analysis_llm_context,
+    dumps,
+    shrink_to_budget,
+)
 
+# Methodology text is kept verbatim from the previous monolithic prompt, but
+# split per desk so only the relevant desks are sent (token efficiency).
 
-def build_analysis_prompt(context: dict[str, Any]) -> str:
-    market_context = dumps_compact(context)
-
-    return f"""\
-Analyze the following structured market-analysis context.
-
-SYMBOL
-{context["symbol"]}
-
+_HARD_RULES = """\
 HARD RULES (do not violate these under any framing):
 - Data comes from a deterministic engine. Treat as observed data.
 - Do not invent missing values or assume unavailable indicators exist.
@@ -38,8 +37,9 @@ HARD RULES (do not violate these under any framing):
 - NO CONTRADICTORY OUTPUT: scenario label, breakout_status, and narration
   must never contradict each other.
 - SPREAD vs ATR: the ATR-based buffer is a volatility estimate, not a
-  live broker spread, unless live spread is explicitly present in context.
+  live broker spread, unless live spread is explicitly present in context."""
 
+_DECISION = """\
 DECISION DISCIPLINE (this replaces any instinct to stay neutral by default):
 - You are given TWO independent scenario sets: `intraday_scenarios`
   (higher-timeframe aligned) and `scalp_scenarios` (entry-timeframe, may
@@ -69,10 +69,25 @@ DECISION DISCIPLINE (this replaces any instinct to stay neutral by default):
   optional. The failure mode to avoid is generic hedge-everything
   language when the underlying data already supports a clear read. Being
   wrong later (when invalidation triggers) is acceptable and expected to
-  be stated plainly in the next read -- it is not a reason to hedge now.
+  be stated plainly in the next read -- it is not a reason to hedge now."""
 
-TRADING METHOD FRAMEWORK (apply these concepts when interpreting context):
+_DESK_RULES = """\
+DESK BRIEF (deterministic router output in `desk`):
+- `desk.reads` = one block per timeframe: latest CLOSED `candle`, its
+  `where` (location vs key levels) and `sweep`, plus `patterns` with aliases
+  already merged: ONE pattern item = ONE evidence family. Never count the
+  entries inside `names` as separate confluence. Each pattern has `vs_htf`
+  and `route` = {desk, play, needs}. Follow the route: cite the candle (tf +
+  OHLC), say which desk (SNR/SMC/ICT) handles it and why, then give the plan
+  and what must still happen.
+- `desk.no_pattern_tfs`: closed candle exists but no pattern was detected.
+- `desk.entry_gate.can_enter_now` is authoritative on whether an entry exists.
+- `desk.setups` are conditional reference levels, NOT a confirmed trade plan;
+  present them as conditional and state their rr / confirmed flag honestly.
+- `desk.unavailable` lists data the engine does not provide: say "tidak
+  tersedia" for those, never estimate them."""
 
+_SMC = """\
 SMC — Smart Money Concepts:
 - Order Blocks (OB): the last opposing candle before a strong impulse move.
   A bullish OB = last bearish candle before a bullish impulse; treat as
@@ -93,8 +108,9 @@ SMC — Smart Money Concepts:
   long entries. After a sweep of buy-side liquidity (BSL) with bearish
   close → look for short entries.
 - Premium / Discount zones: above equilibrium (50% of the range) is premium
-  (favor shorts); below equilibrium is discount (favor longs).
+  (favor shorts); below equilibrium is discount (favor longs)."""
 
+_ICT = """\
 ICT — Inner Circle Trader concepts:
 - Killzones (optimal entry windows): London Open (02:00–05:00 NY time),
   NY AM (08:30–11:00 NY time), NY PM (13:30–16:00 NY time). Flag if the
@@ -108,8 +124,9 @@ ICT — Inner Circle Trader concepts:
 - Mitigation block: when price returns to an OB to partially fill orders
   before continuing in the original direction.
 - Institutional candles (displacement): large-body candles (marubozu /
-  engulfing) that leave FVGs; indicate institutional order flow.
+  engulfing) that leave FVGs; indicate institutional order flow."""
 
+_SNR = """\
 SNR — Support and Resistance:
 - Key levels: swing highs/lows, round numbers, prior session highs/lows,
   weekly/monthly opens, point of control from volume profile if available.
@@ -118,19 +135,18 @@ SNR — Support and Resistance:
 - Level freshness: first test of a level is highest probability; repeated
   tests deplete liquidity. A level tested 3+ times is likely to break.
 - Flip levels: a support that breaks and is retested from below becomes
-  resistance (and vice versa). Always state whether a level has flipped.
+  resistance (and vice versa). Always state whether a level has flipped."""
 
+_CANDLE = """\
 CANDLESTICK PATTERN INTERPRETATION (SMC/ICT/SNR context):
 - Candlestick patterns are descriptive evidence, never standalone entry commands.
 - Use ONLY pattern names/directions/strengths explicitly present in
   deterministic context. Never claim a pattern was detected from prose.
-- Structured context provides multi_timeframe.<TF>.candles (up to 20 recent
-  CLOSED candles, oldest first, last item = latest closed candle) and
-  multi_timeframe.<TF>.patterns (deterministic detections on that latest
-  closed candle(s)). Cite candle OHLC from `candles` as evidence. If
-  `patterns` is empty, state that no pattern was detected; never invent one,
-  and never treat a pattern as an automatic entry. Judge it by location,
-  structure and follow-through.
+- Candles are compact arrays [time_utc,open,high,low,close] (CLOSED candles
+  only, oldest first, last = latest closed). Patterns come from the
+  deterministic engine; if none is listed for a timeframe, say no pattern
+  was detected. A pattern is never an automatic entry: judge it by
+  location, structure and follow-through.
 - Pin bar / Hammer at demand zone or after SSL sweep → bullish confluence;
   require closed-candle confirmation above the pin bar high (or CHoCH).
 - Pin bar / Shooting star at supply zone or after BSL sweep → bearish
@@ -158,8 +174,9 @@ CANDLESTICK PATTERN INTERPRETATION (SMC/ICT/SNR context):
   'FVG data unavailable'; do not estimate.
 - Avoid counting the same formation under multiple pattern aliases as
   independent confluence votes (e.g., pin_bar and hammer on the same candle
-  count as one evidence family).
+  count as one evidence family)."""
 
+_ORDER = """\
 ANALYSIS ORDER
 
 1. MARKET CONDITION -- structure, trend, and which mode(s) have usable
@@ -188,7 +205,49 @@ ANALYSIS ORDER
     name what broke the scenario.
 13. FINAL SUMMARY -- clearest read per mode (intraday and scalp separately)
     with conviction level. Low-conviction = report as low-conviction, not
-    "neutral for safety." High-conviction = commit to the directional read.
+    "neutral for safety." High-conviction = commit to the directional read."""
 
-STRUCTURED MARKET CONTEXT
-{market_context}"""
+_MINIMAL_ORDER = (
+    "ANALYSIS ORDER: market condition, higher timeframe, intraday, entry "
+    "timeframe, pattern & zone confluence, scenarios, conflicts, key levels, "
+    "trade plan, risk, final summary."
+)
+
+_DESK_TEXT = {"SMC": _SMC, "ICT": _ICT, "SNR": _SNR}
+
+
+def build_analysis_prompt(
+    context: dict[str, Any],
+    *,
+    minimal: bool = False,
+) -> str:
+    """Prompt for the full analysis.
+
+    `context` may be the full ai_context or an already-slim one (has `desk`).
+    Only the methodology desks that the deterministic router selected are
+    included. `minimal=True` is the retry shape after a 413.
+    """
+    llm_ctx = context if "desk" in context else build_analysis_llm_context(context)
+    budget = analysis_context_max_chars()
+    llm_ctx = shrink_to_budget(llm_ctx, budget // 2 if minimal else budget)
+
+    desks = (llm_ctx.get("desk") or {}).get("desks") or ["SMC", "ICT", "SNR"]
+
+    parts = [
+        "Analyze the following structured market-analysis context.",
+        f"SYMBOL\n{llm_ctx.get('symbol')}",
+        _HARD_RULES.strip(),
+    ]
+    if not minimal:
+        parts.append(_DECISION.strip())
+    parts.append(_DESK_RULES.strip())
+
+    if not minimal:
+        parts.append("TRADING METHOD FRAMEWORK (only the desks routed for this read):")
+        parts.extend(_DESK_TEXT[d].strip() for d in desks if d in _DESK_TEXT)
+
+    parts.append(_CANDLE.strip())
+    parts.append(_MINIMAL_ORDER if minimal else _ORDER.strip())
+    parts.append("STRUCTURED MARKET CONTEXT\n" + dumps(llm_ctx))
+
+    return "\n\n".join(parts)

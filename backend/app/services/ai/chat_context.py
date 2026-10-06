@@ -1,7 +1,18 @@
+import re
 from typing import Any
 
+from app.services.ai.desk import (
+    build_desk_brief,
+    chat_context_max_chars,
+    slim_bias,
+    slim_levels,
+    slim_multi_timeframe,
+    slim_scenarios,
+    shrink_to_budget,
+    slim_trade_plan,
+)
 
-_CORE_KEYS = ("symbol", "generated_at_utc", "market_bias", "trade_plan")
+_CORE_KEYS = ("symbol", "generated_at_utc")
 
 _TIMEFRAME_HINTS = (
     "h4",
@@ -112,48 +123,14 @@ _BIAS_HINTS = (
 
 
 def _contains_any(text: str, hints: tuple[str, ...]) -> bool:
-    return any(hint in text for hint in hints)
-
-
-def _compact_scenarios(value: Any) -> Any:
-    if not isinstance(value, dict):
-        return value
-
-    scenarios = value.get("scenarios")
-    if not isinstance(scenarios, list):
-        return value
-
-    compacted = []
-    for scenario in scenarios:
-        if not isinstance(scenario, dict):
-            continue
-        compacted.append(
-            {
-                key: scenario.get(key)
-                for key in (
-                    "name",
-                    "direction",
-                    "status",
-                    "breakout_status",
-                    "conviction",
-                    "confluence_score",
-                    "trigger_reference",
-                    "invalidation_reference",
-                    "trigger_distance",
-                    "invalidation_distance",
-                    "near_trigger",
-                    "trigger_confirmed",
-                    "rationale",
-                )
-                if key in scenario
-            }
-        )
-
-    return {
-        "symbol": value.get("symbol"),
-        "current_price": value.get("current_price"),
-        "scenarios": compacted,
-    }
+    for hint in hints:
+        if len(hint) <= 3:
+            # short hints (sl, tp, sr, ema...) must be whole words
+            if re.search(rf"(?<![a-z0-9]){re.escape(hint)}(?![a-z0-9])", text):
+                return True
+        elif hint in text:
+            return True
+    return False
 
 
 def select_chat_context(
@@ -161,11 +138,12 @@ def select_chat_context(
     message: str,
 ) -> dict[str, Any]:
     """
-    Deterministic context selection for AI Analyst Chat.
+    Deterministic, token-efficient context for AI Analyst Chat.
 
-    Does not call an AI classifier. Ensures queries about entry, trend, RSI,
-    SL/TP, scenarios, levels, or fundamentals retain all necessary technical
-    and level context so quality is strictly maintained.
+    Always sends the desk brief (closed candles + collapsed patterns + the
+    desk each one routes to + entry gate + conditional setups). Sections are
+    slimmed: candle tails instead of 200+ bars, nearest levels only, no
+    duplicated trade-plan fields. No AI classifier is called.
     """
     text = message.lower()
 
@@ -174,6 +152,10 @@ def select_chat_context(
         for key in _CORE_KEYS
         if key in ai_context
     }
+    if "market_bias" in ai_context:
+        selected["market_bias"] = slim_bias(ai_context["market_bias"])
+    if "trade_plan" in ai_context:
+        selected["trade_plan"] = slim_trade_plan(ai_context["trade_plan"])
 
     include_mtf = False
     include_levels = False
@@ -189,7 +171,6 @@ def select_chat_context(
         include_scenarios = True
 
     if _contains_any(text, _SCENARIO_HINTS):
-        # Entry, SL/TP, and scenario queries need levels and MTF structure for context
         include_scenarios = True
         include_levels = True
         include_mtf = True
@@ -210,13 +191,17 @@ def select_chat_context(
         include_levels = True
         include_scenarios = True
 
+    selected["desk"] = build_desk_brief(ai_context)
+
     if include_mtf and "multi_timeframe" in ai_context:
-        selected["multi_timeframe"] = ai_context["multi_timeframe"]
+        selected["multi_timeframe"] = slim_multi_timeframe(
+            ai_context["multi_timeframe"], "chat"
+        )
 
     if include_levels and "key_levels" in ai_context:
-        selected["key_levels"] = ai_context["key_levels"]
+        selected["key_levels"] = slim_levels(ai_context["key_levels"], 3)
 
     if include_scenarios and "scenarios" in ai_context:
-        selected["scenarios"] = _compact_scenarios(ai_context["scenarios"])
+        selected["scenarios"] = slim_scenarios(ai_context)
 
-    return selected
+    return shrink_to_budget(selected, chat_context_max_chars())
