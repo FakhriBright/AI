@@ -3,6 +3,7 @@ from typing import Any
 from app.services.ai.base import AIProvider, AIResponse
 from app.services.ai.prompt import build_analysis_prompt
 from app.services.ai.desk import chat_context_max_chars, dumps, shrink_to_budget
+from app.services.ai.text_clean import clean_llm_text
 
 
 SYSTEM_INSTRUCTION = """\
@@ -64,6 +65,13 @@ GAYA: Bahasa Indonesia natural, profesional, tanpa slang berlebihan. Langsung ke
 """
 
 
+def _cleaned(response: AIResponse) -> AIResponse:
+    """Normalise odd unicode spaces/hyphens the model sometimes emits."""
+    if isinstance(getattr(response, "analysis", None), str):
+        response.analysis = clean_llm_text(response.analysis)
+    return response
+
+
 def _provider_status(exc: Exception) -> int | None:
     try:
         return int(getattr(exc, "status_code", None))
@@ -87,18 +95,20 @@ class AIReasoningService:
                 "analysis_prompt": build_analysis_prompt(context),
                 "max_tokens": 2200,
             }
-            return await self.provider.analyze(payload)
+            return _cleaned(await self.provider.analyze(payload))
         except Exception as exc:
             if _provider_status(exc) != 413:
                 raise
 
         # Provider said the request is too large: retry once, smaller.
-        return await self.provider.analyze(
-            {
-                "system_instruction": SYSTEM_INSTRUCTION,
-                "analysis_prompt": build_analysis_prompt(context, minimal=True),
-                "max_tokens": 1800,
-            }
+        return _cleaned(
+            await self.provider.analyze(
+                {
+                    "system_instruction": SYSTEM_INSTRUCTION,
+                    "analysis_prompt": build_analysis_prompt(context, minimal=True),
+                    "max_tokens": 1800,
+                }
+            )
         )
 
     @staticmethod
@@ -140,14 +150,16 @@ class AIReasoningService:
         history_text = self._history_text(history, message)
 
         try:
-            return await self.provider.analyze(
-                {
-                    "system_instruction": CHAT_SYSTEM_INSTRUCTION,
-                    "analysis_prompt": self._chat_prompt(
-                        shrink_to_budget(context, budget), history_text, message
-                    ),
-                    "max_tokens": 1600,
-                }
+            return _cleaned(
+                await self.provider.analyze(
+                    {
+                        "system_instruction": CHAT_SYSTEM_INSTRUCTION,
+                        "analysis_prompt": self._chat_prompt(
+                            shrink_to_budget(context, budget), history_text, message
+                        ),
+                        "max_tokens": 1600,
+                    }
+                )
             )
         except Exception as exc:
             if _provider_status(exc) != 413:
@@ -156,14 +168,16 @@ class AIReasoningService:
         # 413 from the provider: retry once with a much smaller context and
         # shorter history so the trader still gets an answer.
         small = shrink_to_budget(context, budget // 2)
-        return await self.provider.analyze(
-            {
-                "system_instruction": CHAT_SYSTEM_INSTRUCTION,
-                "analysis_prompt": self._chat_prompt(
-                    small,
-                    self._history_text(history, message, limit=2, cut=120),
-                    message,
-                ),
-                "max_tokens": 1200,
-            }
+        return _cleaned(
+            await self.provider.analyze(
+                {
+                    "system_instruction": CHAT_SYSTEM_INSTRUCTION,
+                    "analysis_prompt": self._chat_prompt(
+                        small,
+                        self._history_text(history, message, limit=2, cut=120),
+                        message,
+                    ),
+                    "max_tokens": 1200,
+                }
+            )
         )

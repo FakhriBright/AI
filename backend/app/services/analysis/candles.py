@@ -62,17 +62,26 @@ class MarketDataInvalid(ValueError):
     pass
 
 
+# Gold/index CFDs pause for about an hour every weekday (broker maintenance).
+# Forex pairs (EURUSD...) trade 24h and never show this gap.
+DAILY_BREAK_MAX_GAP_SEC = 90 * 60
+
+
 def is_market_closure_gap(t1: datetime, t2: datetime) -> bool:
     """
     Returns True if the gap between t1 and t2 represents a normal market closure:
-    Weekend closure only.
+    - the weekend closure, or
+    - the short (<= 90 min) weekday daily break of metals/indices.
 
-    Intra-session gaps must not be silently accepted merely because they are
-    shorter than a fixed duration.
+    Longer intra-session gaps are still rejected as abnormal.
     """
     gap_sec = (t2 - t1).total_seconds()
     if gap_sec <= 0 or gap_sec > (72 * 3600):
         return False
+
+    # Daily maintenance break: short gap that starts on a weekday (Mon-Fri).
+    if gap_sec <= DAILY_BREAK_MAX_GAP_SEC and t1.weekday() <= 4:
+        return True
 
     w1 = t1.weekday()
     w2 = t2.weekday()

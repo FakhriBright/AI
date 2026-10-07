@@ -19,6 +19,7 @@ from app.services.analysis.pipeline import (
     analyze_symbol,
     get_deterministic_context,
 )
+from app.services.analysis.errors import market_data_error_detail
 from app.services.market_data.factory import get_market_data_provider
 from app.services.market_data.base import MarketDataProvider
 
@@ -139,6 +140,10 @@ async def analyze_market(
     except HTTPException:
         raise
     except Exception as exc:
+        known = market_data_error_detail(exc)
+        if known is not None:
+            logger.warning("analyze_market data problem for %s: %s", symbol, exc)
+            raise HTTPException(status_code=503, detail=known) from exc
         logger.exception("Unexpected error during analyze_market")
         raise HTTPException(
             status_code=502,
@@ -202,10 +207,14 @@ async def chat_analysis(
         )
         context = _json_safe(context)
     except Exception as exc:
+        known = market_data_error_detail(exc)
+        if known is not None:
+            logger.warning("chat data problem for %s: %s", target_symbol, exc)
+            raise HTTPException(status_code=503, detail=known) from exc
         logger.exception("Error preparing context for chat")
         raise HTTPException(
             status_code=502,
-            detail="Live market analysis is unavailable.",
+            detail=f"Live market analysis is unavailable ({type(exc).__name__}).",
         ) from exc
 
     # Cap conversational history depth to last 4 messages to save prompt tokens

@@ -109,11 +109,17 @@ async function handleSendMessage(textToSend) {
 
 function renderMarkdown(text) {
   if (!text) return ''
-  return text
-    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+  // Escape HTML first (AI output is rendered with v-html), then format.
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>')
     .replace(/`(.*?)`/g, '<code>$1</code>')
     .replace(/\n\n/g, '<br><br>')
     .replace(/\n- /g, '<br>&bull; ')
+    .replace(/\n/g, '<br>')
 }
 </script>
 
@@ -153,7 +159,7 @@ function renderMarkdown(text) {
           :class="msg.role"
         >
           <!-- eslint-disable-next-line vue/no-v-html -->
-          <div v-html="renderMarkdown(msg.content)"></div>
+          <div style="overflow-wrap: anywhere" v-html="renderMarkdown(msg.content)"></div>
         </div>
 
         <div v-if="isLoading" class="chat-bubble assistant text-muted text-xs">
