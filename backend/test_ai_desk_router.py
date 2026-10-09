@@ -253,10 +253,46 @@ def test_target_too_close_and_wide_stop_are_flagged():
     lv = {"supports": [], "resistances": []}
     close = _plan_view("bearish", 100.0, 101.5, 99.0, 2.0, lv, 100.0)
     assert any(f.startswith("target_terlalu_dekat") for f in close["flags"])
-    wide = _plan_view("bearish", 100.0, 108.0, 90.0, 2.0, lv, 100.0)
+    wide = _plan_view("bearish", 100.0, 108.0, 92.0, 2.0, lv, 100.0)
     assert any(f.startswith("stop_terlalu_lebar") for f in wide["flags"])
+    assert wide["verdict"] == "reject"
     nt = _plan_view("bullish", 100.0, 98.0, None, 2.0, lv, 100.0)
     assert nt["verdict"] == "reject" and "tidak_ada_target_layak" in nt["flags"]
+
+
+def test_replacement_stop_is_never_absurdly_far_and_unrealistic_target_rejected():
+    """Regression: a 'replaced' stop was once 10.7 ATR (22 points) away."""
+    from app.services.ai.desk import build_setups
+
+    ctx = {
+        "key_levels": {
+            "current_price": 4195.669,
+            "supports": [{"price": 4194.878}, {"price": 4173.9}, {"price": 4150.0}],
+            "resistances": [{"price": 4219.41}, {"price": 4240.0}],
+        },
+        "scenarios": {"current_price": 4195.669, "intraday_scenarios": [
+            {"name": "bullish_reversal", "direction": "bullish",
+             "trigger_reference": 4194.878, "invalidation_reference": 4194.3,
+             "atr_reference": 2.0, "conviction": "low", "trigger_confirmed": False}]},
+    }
+    setup = build_setups(ctx)[0]
+    for view in (setup["ref"], setup["now"]):
+        assert view["stop_atr"] <= 1.0           # ATR stop, not a far level
+        assert view["stop_src"] == "atr"
+        assert "level_struktur_terlalu_jauh_pakai_atr" in view["flags"]
+        assert any(f.startswith("target_terlalu_jauh") for f in view["flags"])
+        assert view["verdict"] == "reject"       # 12 ATR target is not a plan
+    assert setup["ref"]["order"] == "buy_limit"  # entry below price -> limit
+
+
+def test_order_type_geometry():
+    from app.services.ai.desk import _order_type
+
+    assert _order_type("bullish", 99.0, 100.0, 2.0) == "buy_limit"
+    assert _order_type("bullish", 101.0, 100.0, 2.0) == "buy_stop"
+    assert _order_type("bearish", 101.0, 100.0, 2.0) == "sell_limit"
+    assert _order_type("bearish", 99.0, 100.0, 2.0) == "sell_stop"
+    assert _order_type("bearish", 100.1, 100.0, 2.0) == "market"
 
 
 def test_pattern_relevance_far_pattern_is_not_evidence():

@@ -32,11 +32,12 @@ MAX_READS = 5
 MAX_SETUPS = 3
 
 # --- setup validator thresholds (multiples of the working ATR) -------------
-MIN_STOP_ATR = 0.5      # tighter than this = noise/spread will take it out
+MIN_STOP_ATR = 0.75     # tighter than this = noise/spread will take it out
 MAX_STOP_ATR = 3.0      # wider than this = risk too large for a clean setup
 STOP_BUFFER_ATR = 0.25  # buffer beyond a structure level used as stop
 FALLBACK_STOP_ATR = 1.0 # ATR stop when no structure level is far enough
 TARGET_MIN_ATR = 1.0    # a target closer than this is not worth the trade
+TARGET_MAX_ATR = 5.0    # a target further than this is unrealistic intraday
 RR_SUSPICIOUS = 5.0     # RR above this almost always means a too-tight stop
 ENTRY_FAR_ATR = 2.0     # pending entry further than this from price
 # --- pattern relevance to the CURRENT price (multiples of working ATR) -----
@@ -588,6 +589,23 @@ def _work_atr(ai_context: dict[str, Any], sc: dict[str, Any]) -> float | None:
     return None
 
 
+# Flags that make a setup unusable as presented (not just "be careful").
+_HARD_FLAGS = ("stop_terlalu_lebar", "target_terlalu_jauh", "tidak_ada_target_layak")
+
+
+def _order_type(
+    direction: str, entry: float, price: float | None, atr: float | None
+) -> str | None:
+    """buy_limit / buy_stop / sell_limit / sell_stop / market (geometry only)."""
+    if price is None:
+        return None
+    if abs(entry - price) <= 0.1 * (atr or 0.0):
+        return "market"
+    if direction == "bullish":
+        return "buy_limit" if entry < price else "buy_stop"
+    return "sell_limit" if entry > price else "sell_stop"
+
+
 def _plan_view(
     direction: str,
     entry: float,
@@ -626,19 +644,27 @@ def _plan_view(
                 p for p in pool
                 if p is not None and (p >= far_enough if bearish else p <= far_enough)
             ]
+            struct_stop = None
             if pool:
                 base = min(pool) if bearish else max(pool)
-                stop = base + STOP_BUFFER_ATR * atr if bearish else base - STOP_BUFFER_ATR * atr
+                struct_stop = (
+                    base + STOP_BUFFER_ATR * atr if bearish else base - STOP_BUFFER_ATR * atr
+                )
+            if struct_stop is not None and abs(struct_stop - entry) <= MAX_STOP_ATR * atr:
+                stop = struct_stop
                 src = "struktur+buffer"
             else:
                 stop = entry + FALLBACK_STOP_ATR * atr if bearish else entry - FALLBACK_STOP_ATR * atr
                 src = "atr"
+                if struct_stop is not None:
+                    flags.append("level_struktur_terlalu_jauh_pakai_atr")
             risk = abs(stop - entry)
             view["raw_stop"] = _r(raw)
             flags.append(f"stop_scenario_terlalu_rapat({stop_atr:.2f}ATR)_diganti")
-        elif stop_atr > MAX_STOP_ATR:
-            flags.append(f"stop_terlalu_lebar({stop_atr:.1f}ATR)")
-        view["stop_atr"] = _r(risk / atr, 2)
+        final_atr = risk / atr
+        if final_atr > MAX_STOP_ATR:
+            flags.append(f"stop_terlalu_lebar({final_atr:.1f}ATR)")
+        view["stop_atr"] = _r(final_atr, 2)
         if check_entry_far and price is not None:
             gap = abs(entry - price) / atr
             if gap > ENTRY_FAR_ATR:
@@ -669,12 +695,15 @@ def _plan_view(
     view["rr"] = _r(rr, 2)
     if atr and reward / atr < TARGET_MIN_ATR:
         flags.append(f"target_terlalu_dekat({reward / atr:.2f}ATR)")
+    if atr and reward / atr > TARGET_MAX_ATR:
+        flags.append(f"target_terlalu_jauh({reward / atr:.1f}ATR)")
     if rr < 1:
         flags.append("rr_di_bawah_1")
     if rr > RR_SUSPICIOUS:
         flags.append("rr_tidak_wajar_tinggi")
 
-    view["verdict"] = "warn" if flags else "ok"
+    hard = any(f.startswith(_HARD_FLAGS) for f in flags)
+    view["verdict"] = "reject" if hard else "warn" if flags else "ok"
     if flags:
         view["flags"] = flags
     return view
@@ -735,6 +764,9 @@ def build_setups(
             "trigger_dist_atr": _r(sc.get("trigger_distance_atr"), 2),
             "ref": _plan_view(direction, entry, stop, target, atr, levels, price, True),
         }
+        order = _order_type(direction, entry, price, atr)
+        if order:
+            setup["ref"]["order"] = order
         if price is not None:
             setup["now"] = _plan_view(direction, price, stop, target, atr, levels, price)
 
