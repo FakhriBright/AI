@@ -622,7 +622,14 @@ def check_view(
 
 
 # Flags that make a setup unusable as presented (not just "be careful").
-_HARD_FLAGS = ("stop_terlalu_lebar", "target_terlalu_jauh", "tidak_ada_target_layak")
+_HARD_FLAGS = (
+    "stop_terlalu_lebar",
+    "target_terlalu_jauh",
+    "target_terlalu_dekat",
+    "rr_di_bawah_1",
+    "tidak_ada_target_layak",
+    "atr_tidak_tersedia",
+)
 
 
 def _order_type(
@@ -820,9 +827,31 @@ def build_setups(
         }
         order = _order_type(direction, entry, price, atr)
         if order:
+            # Geometry only: this describes the order type IF the trigger level
+            # were submitted now. It is not permission to place an order.
             setup["ref"]["order"] = order
         if price is not None:
             setup["now"] = _plan_view(direction, price, stop, target, atr, levels, price)
+            setup["now"]["order"] = "market"
+
+        # Keep execution semantics explicit so the LLM cannot conflate a
+        # conditional trigger reference with a market entry after confirmation.
+        # A confirmation is a state change; it does not retroactively turn the
+        # reference-level order into the correct live order.
+        setup["execution"] = {
+            "status": (
+                "confirmed_reassess_plan"
+                if bool(sc.get("trigger_confirmed"))
+                else "wait_for_confirmation"
+            ),
+            "place_order_now": False,
+            "reference_order_type": order,
+            "rule": setup["confirm_rule"],
+            "after_confirmation": (
+                "Reassess the current price and a fresh validated trade plan; "
+                "do not automatically place the reference-level order."
+            ),
+        }
 
         # The engine's own trigger distance must agree with price/ATR here.
         engine_dist = _num(sc.get("trigger_distance_atr"))

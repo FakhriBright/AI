@@ -372,3 +372,27 @@ if __name__ == "__main__":
     print("full ai_context chars:", context_size(full))
     print("chat context chars   :", context_size(ctx))
     print(json.dumps(ctx["desk"], indent=1, ensure_ascii=False)[:3800])
+
+
+def test_unconfirmed_setup_is_reference_only_not_an_order_instruction():
+    from app.services.ai.desk import build_setups
+
+    setup = next(s for s in build_setups(_setup_ctx()) if s["dir"] == "bullish")
+    assert setup["confirmed"] is False
+    assert setup["execution"]["status"] == "wait_for_confirmation"
+    assert setup["execution"]["place_order_now"] is False
+    assert setup["execution"]["reference_order_type"] == setup["ref"]["order"]
+    assert "reassess" in setup["execution"]["after_confirmation"].lower()
+    assert setup["now"]["order"] == "market"
+
+
+def test_rejected_risk_geometry_cannot_be_called_actionable():
+    from app.services.ai.desk import _plan_view
+
+    levels = {"supports": [], "resistances": []}
+    missing_atr = _plan_view("bullish", 100, 98, 105, None, levels, 100)
+    low_rr = _plan_view("bullish", 100, 98, 99.5, 1.0, levels, 100)
+    close_target = _plan_view("bullish", 100, 98, 100.5, 1.0, levels, 100)
+    assert missing_atr["verdict"] == "reject"
+    assert low_rr["verdict"] == "reject"
+    assert close_target["verdict"] == "reject"

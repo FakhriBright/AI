@@ -82,12 +82,18 @@ DESK BRIEF (deterministic router output in `desk`):
   and what must still happen.
 - `desk.no_pattern_tfs`: closed candle exists but no pattern was detected.
 - `desk.entry_gate.can_enter_now` is authoritative on whether an entry exists.
-- `desk.setups` are conditional reference levels, NOT a confirmed trade plan.
-  Each has `ref` (entry at trigger) and `now` (entry at market) views already
-  validated by the backend (stop distance in ATR, replaced tight stops,
-  target distance, recomputed RR, `verdict` ok/warn/reject, `flags`). Copy the
-  numbers; never recompute. A high RR is not quality: flags such as
-  rr_tidak_wajar_tinggi or stop_scenario_terlalu_rapat must be reported.
+- `desk.setups` are conditional reference calculations, NOT permission to
+  place an order. `ref` is hypothetical entry at trigger; `now` is hypothetical
+  entry at snapshot market price. Both are backend-validated calculations.
+  `ref.order` describes order geometry only; it is NOT an execution instruction.
+  `execution.place_order_now` is authoritative and false for scenario-reference
+  setups. If `execution.status=wait_for_confirmation`, wait for the exact
+  `confirm_rule`, then reassess current price and a fresh plan. Never recommend
+  both a pending order at `ref.entry` and a market order after confirmation.
+  Never mix prices from `ref`, `now`, and `trade_plan` in one plan. Copy values;
+  never recompute. High RR is not quality: report `rr_tidak_wajar_tinggi`.
+  Reject views flagged for invalid geometry, missing ATR, RR below 1, or
+  implausible target/stop distances; do not present them as actionable.
   Patterns with `rel: far` are historical context, never entry evidence.
   Do not mix triggers from different `mode` (intraday/scalp).
 - `desk.unavailable` lists data the engine does not provide: say "tidak
