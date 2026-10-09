@@ -589,6 +589,38 @@ def _work_atr(ai_context: dict[str, Any], sc: dict[str, Any]) -> float | None:
     return None
 
 
+def check_view(
+    direction: str, view: dict[str, Any], atr: float | None
+) -> list[str]:
+    """Independently re-derive a finished view from the numbers the LLM sees.
+
+    Guards against any future bug where risk/reward/RR/ATR distance disagree
+    with entry/stop/target. Returns a list of problems (empty = consistent).
+    """
+    problems: list[str] = []
+    entry, stop, target = view.get("entry"), view.get("stop"), view.get("target")
+    if entry is None or stop is None:
+        return problems
+
+    bearish = direction == "bearish"
+    if (bearish and stop <= entry) or (not bearish and stop >= entry):
+        problems.append("stop_di_sisi_salah")
+    risk = abs(entry - stop)
+    if view.get("risk") is not None and abs(view["risk"] - risk) > 0.01 + 0.005 * risk:
+        problems.append("risk_tidak_cocok")
+    if atr and view.get("stop_atr") is not None and abs(view["stop_atr"] - risk / atr) > 0.03:
+        problems.append("stop_atr_tidak_cocok")
+    if target is not None:
+        reward = (entry - target) if bearish else (target - entry)
+        if reward <= 0:
+            problems.append("target_di_sisi_salah")
+        elif risk > 0 and view.get("rr") is not None:
+            rr = reward / risk
+            if abs(view["rr"] - rr) > 0.02 + 0.01 * rr:
+                problems.append("rr_tidak_cocok")
+    return problems
+
+
 # Flags that make a setup unusable as presented (not just "be careful").
 _HARD_FLAGS = ("stop_terlalu_lebar", "target_terlalu_jauh", "tidak_ada_target_layak")
 
@@ -656,11 +688,21 @@ def _plan_view(
             else:
                 stop = entry + FALLBACK_STOP_ATR * atr if bearish else entry - FALLBACK_STOP_ATR * atr
                 src = "atr"
-                if struct_stop is not None:
-                    flags.append("level_struktur_terlalu_jauh_pakai_atr")
             risk = abs(stop - entry)
             view["raw_stop"] = _r(raw)
-            flags.append(f"stop_scenario_terlalu_rapat({stop_atr:.2f}ATR)_diganti")
+            # Information, NOT a warning about the final plan: the original
+            # stop was replaced. The final stop is described by stop_atr.
+            how = (
+                "level struktur + buffer"
+                if src == "struktur+buffer"
+                else "1 ATR (level struktur terlalu jauh)"
+                if struct_stop is not None
+                else "1 ATR (tidak ada level struktur)"
+            )
+            view["stop_note"] = (
+                f"SL scenario awal hanya {stop_atr:.2f} ATR (terlalu rapat) sehingga "
+                f"diganti dengan {how}; SL final {abs(stop - entry) / atr:.2f} ATR"
+            )
         final_atr = risk / atr
         if final_atr > MAX_STOP_ATR:
             flags.append(f"stop_terlalu_lebar({final_atr:.1f}ATR)")
@@ -702,7 +744,11 @@ def _plan_view(
     if rr > RR_SUSPICIOUS:
         flags.append("rr_tidak_wajar_tinggi")
 
-    hard = any(f.startswith(_HARD_FLAGS) for f in flags)
+    problems = check_view(direction, view, atr)
+    if problems:
+        flags.append("validator_inkonsisten(" + ",".join(problems) + ")")
+
+    hard = bool(problems) or any(f.startswith(_HARD_FLAGS) for f in flags)
     view["verdict"] = "reject" if hard else "warn" if flags else "ok"
     if flags:
         view["flags"] = flags
@@ -755,13 +801,21 @@ def build_setups(
             pool = [p for p in pool if p is not None and p >= entry + min_gap]
             target = min(pool) if pool else None
 
+        mode = sc.get("mode") or "intraday"
         setup: dict[str, Any] = {
             "scenario": sc.get("name"),
-            "mode": sc.get("mode") or "intraday",
+            "mode": mode,
+            "atr": _r(atr, 2),
+            "atr_basis": "H1/M15" if mode == "intraday" else "M5/M15",
             "dir": direction,
             "conviction": sc.get("conviction"),
             "confirmed": bool(sc.get("trigger_confirmed")),
             "trigger_dist_atr": _r(sc.get("trigger_distance_atr"), 2),
+            "confirm_rule": (
+                f"candle close di bawah {_r(entry)}"
+                if direction == "bearish"
+                else f"harga menyentuh/menembus {_r(entry)} lalu candle close kembali di atasnya"
+            ),
             "ref": _plan_view(direction, entry, stop, target, atr, levels, price, True),
         }
         order = _order_type(direction, entry, price, atr)
@@ -769,6 +823,15 @@ def build_setups(
             setup["ref"]["order"] = order
         if price is not None:
             setup["now"] = _plan_view(direction, price, stop, target, atr, levels, price)
+
+        # The engine's own trigger distance must agree with price/ATR here.
+        engine_dist = _num(sc.get("trigger_distance_atr"))
+        if price is not None and atr and engine_dist is not None:
+            mine = abs(price - entry) / atr
+            if abs(mine - engine_dist) > max(0.05, 0.25 * engine_dist):
+                setup["checks"] = [
+                    f"jarak_trigger_tidak_konsisten(engine {engine_dist:.2f} vs hitung {mine:.2f} ATR)"
+                ]
 
         pro, con = _pattern_side(reads, direction)
         if pro:

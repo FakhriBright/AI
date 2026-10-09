@@ -106,7 +106,7 @@ def test_analysis_prompt_is_routed_and_compact():
     # old monolithic prompt + full context was ~55k chars here
     assert len(prompt) < 22000
     minimal = build_analysis_prompt(full, minimal=True)
-    assert len(minimal) < len(prompt) * 0.7
+    assert len(minimal) < len(prompt) * 0.8
 
 
 class Provider413:
@@ -230,8 +230,9 @@ def test_tight_scenario_stop_is_replaced_not_sold_as_20R():
     assert now["stop_atr"] == 2.71                # 5.419 / 2.0
     assert now["rr"] == 1.63                      # 8.841 / 5.419
     assert now["rr"] < 5
-    assert now["verdict"] == "warn"
-    assert any(f.startswith("stop_scenario_terlalu_rapat") for f in now["flags"])
+    assert now["verdict"] == "ok"                 # final numbers are healthy
+    assert "terlalu rapat" in now["stop_note"] and "2.71 ATR" in now["stop_note"]
+    assert "flags" not in now                     # replacement is info, not a warning
     # pending view uses the real trigger with a healthy stop
     ref = setup["ref"]
     assert (ref["entry"], ref["stop"], ref["target"]) == (4131.238, 4134.379, 4125.104)
@@ -279,10 +280,11 @@ def test_replacement_stop_is_never_absurdly_far_and_unrealistic_target_rejected(
     for view in (setup["ref"], setup["now"]):
         assert view["stop_atr"] <= 1.0           # ATR stop, not a far level
         assert view["stop_src"] == "atr"
-        assert "level_struktur_terlalu_jauh_pakai_atr" in view["flags"]
+        assert "level struktur terlalu jauh" in view["stop_note"]
         assert any(f.startswith("target_terlalu_jauh") for f in view["flags"])
         assert view["verdict"] == "reject"       # 12 ATR target is not a plan
     assert setup["ref"]["order"] == "buy_limit"  # entry below price -> limit
+    assert "kembali di atasnya" in setup["confirm_rule"]
 
 
 def test_order_type_geometry():

@@ -1,8 +1,10 @@
+import logging
 from typing import Any
 
 from app.services.ai.base import AIProvider, AIResponse
 from app.services.ai.prompt import build_analysis_prompt
 from app.services.ai.desk import chat_context_max_chars, dumps, shrink_to_budget
+from app.services.ai.answer_audit import audit_answer
 from app.services.ai.text_clean import clean_llm_text
 
 
@@ -31,6 +33,8 @@ CRITICAL PRESENTATION & EXPLANATION RULES:
 """.strip()
 
 
+logger = logging.getLogger(__name__)
+
 CHAT_SYSTEM_INSTRUCTION = """\
 Kamu analis trading senior di sebuah trading desk, melayani trader manual (eksekusi manual di MT5).
 Engine deterministic sudah memproses candle CLOSED, pola candlestick, level, scenario dan risk. Kamu tidak menghitung angka baru; tugasmu membaca bukti itu, memilih jalur yang tepat, dan menjawab pertanyaan trader seperti rekan yang paham.
@@ -45,7 +49,9 @@ CARA KERJA (seperti divisi di kantor):
    Tiap tampilan berisi entry, stop, target, risk, reward, rr, stop_atr (jarak SL dalam ATR), `stop_src`, `verdict` (ok/warn/reject) dan `flags`. Salin angka apa adanya; JANGAN menghitung ulang RR, SL, TP, atau jarak.
    - `verdict` reject: jangan sajikan sebagai setup; jelaskan alasannya (`note`/`flags`).
    - `verdict` warn: sampaikan setiap flag dengan bahasa natural (mis. target terlalu dekat, RR di bawah 1, stop terlalu lebar, entry jauh dari harga) dan jangan menyebutnya setup bagus.
-   - `raw_stop` muncul jika SL dari scenario terlalu rapat (noise/spread mudah menyentuhnya) dan sudah diganti SL struktur/ATR (`stop_src`). Pakai `stop` yang baru dan jelaskan singkat kenapa SL scenario tidak dipakai.
+   - `stop_note`/`raw_stop` muncul jika SL awal scenario terlalu rapat lalu diganti. Itu hanya keterangan: SL FINAL adalah `stop` dengan jarak `stop_atr`. Jangan menulis "stop terlalu rapat" untuk SL final, dan jangan menyebut SL yang lebih lebar "lebih aman": lebih lebar berarti risiko per lot lebih besar dan RR lebih kecil.
+   - Jarak "ATR" diukur terhadap `atr` setup (basis `atr_basis`: H1/M15 untuk intraday, M5/M15 untuk scalp), bukan ATR timeframe lain; sebut basisnya bila menyebut jarak ATR. Jika `checks` terisi, sampaikan bahwa data jarak trigger tidak konsisten.
+   - `confirm_rule` adalah syarat konfirmasi resmi dari engine; kutip itu, jangan membuat syarat sendiri. `trigger_dist_atr` adalah jarak harga SAAT INI ke trigger, bukan syarat konfirmasi.
    - Hanya sebut flag yang benar-benar ada di `flags`; jangan menambah ambang atau alasan sendiri. Jika ada flag stop_terlalu_lebar atau target_terlalu_jauh, katakan terus terang bahwa setup itu tidak realistis untuk intraday dan sarankan skip/tunggu, jangan disajikan sebagai rekomendasi masuk.
    - RR tinggi BUKAN tanda setup bagus. Jika ada flag rr_tidak_wajar_tinggi, katakan angkanya mencurigakan dan jangan dijadikan alasan entry.
    - Tiap setup punya `mode` (intraday/scalp) dengan trigger sendiri. Sebut mode-nya dan JANGAN mencampur trigger/level dari dua mode dalam satu rekomendasi.
@@ -77,6 +83,20 @@ def _cleaned(response: AIResponse) -> AIResponse:
     if isinstance(getattr(response, "analysis", None), str):
         response.analysis = clean_llm_text(response.analysis)
     return response
+
+
+def _log_audit(response: AIResponse, context: dict[str, Any]) -> None:
+    """Log numbers the model quoted that are not in the context it was given."""
+    try:
+        report = audit_answer(getattr(response, "analysis", ""), context)
+        if report["ungrounded"]:
+            logger.warning(
+                "AI_GROUNDING ungrounded_numbers=%s checked=%s",
+                report["ungrounded"][:8],
+                report["checked"],
+            )
+    except Exception:  # auditing must never break a chat answer
+        logger.debug("AI_GROUNDING audit failed", exc_info=True)
 
 
 def _provider_status(exc: Exception) -> int | None:
@@ -158,19 +178,20 @@ class AIReasoningService:
     ) -> AIResponse:
         budget = chat_context_max_chars()
         history_text = self._history_text(history, message)
+        sent = shrink_to_budget(context, budget)
 
         try:
-            return _cleaned(
+            response = _cleaned(
                 await self.provider.analyze(
                     {
                         "system_instruction": CHAT_SYSTEM_INSTRUCTION,
-                        "analysis_prompt": self._chat_prompt(
-                            shrink_to_budget(context, budget), history_text, message
-                        ),
+                        "analysis_prompt": self._chat_prompt(sent, history_text, message),
                         "max_tokens": 1600,
                     }
                 )
             )
+            _log_audit(response, sent)
+            return response
         except Exception as exc:
             if _provider_status(exc) != 413:
                 raise
