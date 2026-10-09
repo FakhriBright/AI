@@ -31,6 +31,18 @@ STRUCT_TFS = ("D1", "H4", "H1", "M15", "M5")
 MAX_READS = 5
 MAX_SETUPS = 3
 
+# --- setup validator thresholds (multiples of the working ATR) -------------
+MIN_STOP_ATR = 0.5      # tighter than this = noise/spread will take it out
+MAX_STOP_ATR = 3.0      # wider than this = risk too large for a clean setup
+STOP_BUFFER_ATR = 0.25  # buffer beyond a structure level used as stop
+FALLBACK_STOP_ATR = 1.0 # ATR stop when no structure level is far enough
+TARGET_MIN_ATR = 1.0    # a target closer than this is not worth the trade
+RR_SUSPICIOUS = 5.0     # RR above this almost always means a too-tight stop
+ENTRY_FAR_ATR = 2.0     # pending entry further than this from price
+# --- pattern relevance to the CURRENT price (multiples of working ATR) -----
+REL_NEAR_ATR = 1.0
+REL_OK_ATR = 2.5
+
 # Closed candles kept per timeframe in the LLM view.
 CANDLE_TAIL = {
     "chat": {"M1": 4, "M5": 5, "M15": 5, "M30": 3, "H1": 3, "H4": 2, "D1": 2},
@@ -223,7 +235,9 @@ def locate_candle(
                 )
 
     if touched:
-        touched.sort(key=lambda t: (-t[0], -t[1]))
+        touched.sort(
+            key=lambda t: (abs(close - float(t[3]["price"])), -t[0], -t[1])
+        )
         touches, _, level_type, level = touched[0]
         return {
             "at": level_type,
@@ -365,6 +379,41 @@ def premium_discount(swings: list[Any], price: float | None) -> dict[str, Any] |
     }
 
 
+def pattern_relevance(
+    where: dict[str, Any],
+    candle: Any,
+    price: float | None,
+    work_atr: float | None,
+) -> tuple[str, float | None]:
+    """Is this pattern relevant to the CURRENT price? (exists != relevant)
+
+    near / ok / far / unknown, judged against the level the pattern sits on.
+    """
+    if price is None or not work_atr:
+        return "unknown", None
+
+    if where.get("at") in ("support", "resistance") and where.get("price") is not None:
+        dist = abs(float(where["price"]) - price) / work_atr
+    else:
+        fields = _candle_fields(candle)
+        if fields is None:
+            return "unknown", None
+        _, high, low, _ = fields
+        if low - 0.5 * work_atr <= price <= high + 0.5 * work_atr:
+            return "ok", 0.0
+        dist = min(abs(price - high), abs(price - low)) / work_atr
+
+    label = "near" if dist <= REL_NEAR_ATR else "ok" if dist <= REL_OK_ATR else "far"
+    return label, _r(dist, 2)
+
+
+_FAR_ROUTE = {
+    "desk": ["SNR"],
+    "play": "Pola ini terjadi jauh dari harga sekarang: konteks historis, bukan dasar entry.",
+    "needs": "Abaikan untuk setup saat ini; tunggu harga mendekati level pola itu.",
+}
+
+
 # --------------------------------------------------------------------------
 # routing playbook: candle family + location -> desk + plan
 # --------------------------------------------------------------------------
@@ -493,7 +542,7 @@ def build_entry_gate(ai_context: dict[str, Any]) -> dict[str, Any]:
             if not sc.get("trigger_confirmed") and sc.get("trigger_reference") is not None:
                 dist = _r(sc.get("trigger_distance_atr"), 2)
                 blockers.append(
-                    f"{sc.get('name')}: trigger {_r(sc.get('trigger_reference'))}"
+                    f"[{sc.get('mode') or 'intraday'}] {sc.get('name')}: trigger {_r(sc.get('trigger_reference'))}"
                     + (f" masih {dist} ATR" if dist is not None else "")
                     + f" ({sc.get('breakout_status', 'awaiting')})"
                 )
@@ -516,6 +565,8 @@ def _pattern_side(
     pro: list[str] = []
     con: list[str] = []
     for block in reads or []:
+        if block.get("rel") == "far":
+            continue
         for pat in block.get("patterns", []):
             if pat.get("dir") not in ("bullish", "bearish"):
                 continue
@@ -524,15 +575,122 @@ def _pattern_side(
     return pro[:3], con[:3]
 
 
+def _work_atr(ai_context: dict[str, Any], sc: dict[str, Any]) -> float | None:
+    """Scale used for all validator thresholds: the scenario ATR, else M15/M5."""
+    atr = _num(sc.get("atr_reference"))
+    if atr:
+        return atr
+    mtf = _as_dict(ai_context.get("multi_timeframe"))
+    for tf in ("M15", "M5"):
+        atr = _num(_as_dict(mtf.get(tf)).get("atr14"))
+        if atr:
+            return atr
+    return None
+
+
+def _plan_view(
+    direction: str,
+    entry: float,
+    stop: float,
+    target: float | None,
+    atr: float | None,
+    levels: dict[str, Any],
+    price: float | None,
+    check_entry_far: bool = False,
+) -> dict[str, Any]:
+    """Validate one entry/stop/target view and recompute RR (backend, not LLM).
+
+    A stop that is too tight is REPLACED by a structure/ATR based stop, and
+    the original is kept as raw_stop. The verdict is ok / warn / reject.
+    """
+    flags: list[str] = []
+    bearish = direction == "bearish"
+    view: dict[str, Any] = {"entry": _r(entry)}
+
+    if (bearish and stop <= entry) or (not bearish and stop >= entry):
+        view["note"] = "harga sudah melewati stop; setup tidak valid untuk entry di sini"
+        view["verdict"] = "reject"
+        return view
+
+    risk = abs(stop - entry)
+    src = "scenario"
+
+    if atr:
+        stop_atr = risk / atr
+        if stop_atr < MIN_STOP_ATR:
+            raw = stop
+            far_enough = entry + MIN_STOP_ATR * atr if bearish else entry - MIN_STOP_ATR * atr
+            side = "resistances" if bearish else "supports"
+            pool = [_num(_as_dict(l).get("price")) for l in levels.get(side) or []]
+            pool = [
+                p for p in pool
+                if p is not None and (p >= far_enough if bearish else p <= far_enough)
+            ]
+            if pool:
+                base = min(pool) if bearish else max(pool)
+                stop = base + STOP_BUFFER_ATR * atr if bearish else base - STOP_BUFFER_ATR * atr
+                src = "struktur+buffer"
+            else:
+                stop = entry + FALLBACK_STOP_ATR * atr if bearish else entry - FALLBACK_STOP_ATR * atr
+                src = "atr"
+            risk = abs(stop - entry)
+            view["raw_stop"] = _r(raw)
+            flags.append(f"stop_scenario_terlalu_rapat({stop_atr:.2f}ATR)_diganti")
+        elif stop_atr > MAX_STOP_ATR:
+            flags.append(f"stop_terlalu_lebar({stop_atr:.1f}ATR)")
+        view["stop_atr"] = _r(risk / atr, 2)
+        if check_entry_far and price is not None:
+            gap = abs(entry - price) / atr
+            if gap > ENTRY_FAR_ATR:
+                flags.append(f"entry_jauh_dari_harga({gap:.1f}ATR)")
+    else:
+        flags.append("atr_tidak_tersedia")
+
+    view["stop"] = _r(stop)
+    view["risk"] = _r(risk)
+    view["stop_src"] = src
+
+    if target is None:
+        flags.append("tidak_ada_target_layak")
+        view["verdict"] = "reject"
+        view["flags"] = flags
+        return view
+
+    reward = (entry - target) if bearish else (target - entry)
+    if reward <= 0:
+        view["note"] = "harga sudah melewati target"
+        view["verdict"] = "reject"
+        view["flags"] = flags
+        return view
+
+    rr = reward / risk
+    view["target"] = _r(target)
+    view["reward"] = _r(reward)
+    view["rr"] = _r(rr, 2)
+    if atr and reward / atr < TARGET_MIN_ATR:
+        flags.append(f"target_terlalu_dekat({reward / atr:.2f}ATR)")
+    if rr < 1:
+        flags.append("rr_di_bawah_1")
+    if rr > RR_SUSPICIOUS:
+        flags.append("rr_tidak_wajar_tinggi")
+
+    view["verdict"] = "warn" if flags else "ok"
+    if flags:
+        view["flags"] = flags
+    return view
+
+
 def build_setups(
     ai_context: dict[str, Any],
     reads: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Conditional setups from existing scenario + key level fields only.
 
-    Two reward/risk views are precomputed so the LLM never has to do math:
-    - rr_at_ref : entering at entry_ref (pending order at the trigger level)
-    - now_*     : entering at the current market price
+    Every number the LLM may quote is computed and VALIDATED here:
+    - ref : entering at entry_ref (pending order at the trigger level)
+    - now : entering at the current market price
+    Stops that are too tight are replaced (structure/ATR based); targets that
+    are too close are flagged; RR is always recomputed by the backend.
     """
     levels = _as_dict(ai_context.get("key_levels"))
     price = _num(levels.get("current_price"))
@@ -554,62 +712,31 @@ def build_setups(
         if direction == "bullish" and stop >= entry:
             continue
 
-        # A target closer than half the risk (or half an ATR) is noise, not a
-        # target: skip such levels and take the next one.
-        atr = _num(sc.get("atr_reference"))
-        min_gap = max(0.5 * risk, 0.5 * atr if atr else 0.0)
+        atr = _work_atr(ai_context, sc)
+        # A target closer than half the risk (or one ATR) is noise: skip it.
+        min_gap = max(0.5 * risk, TARGET_MIN_ATR * atr if atr else 0.0)
 
         target: float | None = None
         if direction == "bearish":
-            pool = [
-                _num(_as_dict(l).get("price")) for l in levels.get("supports") or []
-            ]
+            pool = [_num(_as_dict(l).get("price")) for l in levels.get("supports") or []]
             pool = [p for p in pool if p is not None and p <= entry - min_gap]
             target = max(pool) if pool else None
         else:
-            pool = [
-                _num(_as_dict(l).get("price")) for l in levels.get("resistances") or []
-            ]
+            pool = [_num(_as_dict(l).get("price")) for l in levels.get("resistances") or []]
             pool = [p for p in pool if p is not None and p >= entry + min_gap]
             target = min(pool) if pool else None
 
-        rr_ref = _r(abs(target - entry) / risk, 2) if target is not None else None
-
         setup: dict[str, Any] = {
             "scenario": sc.get("name"),
-            "mode": sc.get("mode"),
+            "mode": sc.get("mode") or "intraday",
             "dir": direction,
             "conviction": sc.get("conviction"),
             "confirmed": bool(sc.get("trigger_confirmed")),
             "trigger_dist_atr": _r(sc.get("trigger_distance_atr"), 2),
-            "entry_ref": _r(entry),
-            "stop_ref": _r(stop),
-            "target_ref": _r(target),
-            "rr_at_ref": rr_ref,
+            "ref": _plan_view(direction, entry, stop, target, atr, levels, price, True),
         }
-
-        # Market-entry view (entry = current price, same SL and TP).
         if price is not None:
-            if direction == "bearish":
-                now_risk = stop - price
-                now_reward = price - target if target is not None else None
-            else:
-                now_risk = price - stop
-                now_reward = target - price if target is not None else None
-
-            setup["now_entry"] = _r(price)
-            if now_risk <= 0:
-                setup["now_note"] = "harga sudah melewati stop_ref; setup ini tidak valid untuk entry sekarang"
-            elif target is None:
-                setup["now_risk"] = _r(now_risk)
-                setup["now_note"] = "tidak ada target level yang layak"
-            elif now_reward is None or now_reward <= 0:
-                setup["now_risk"] = _r(now_risk)
-                setup["now_note"] = "harga sudah melewati target_ref"
-            else:
-                setup["now_risk"] = _r(now_risk)
-                setup["now_reward"] = _r(now_reward)
-                setup["now_rr"] = _r(now_reward / now_risk, 2)
+            setup["now"] = _plan_view(direction, price, stop, target, atr, levels, price)
 
         pro, con = _pattern_side(reads, direction)
         if pro:
@@ -618,9 +745,11 @@ def build_setups(
             setup["patterns_against"] = con
         out.append(setup)
 
+    verdict_rank = {"ok": 0, "warn": 1, "reject": 2}
     out.sort(
         key=lambda s: (
             not s["confirmed"],
+            verdict_rank.get(_as_dict(s.get("now") or s["ref"]).get("verdict"), 2),
             -_CONVICTION_RANK.get(s.get("conviction"), 0),
             s["trigger_dist_atr"] if s["trigger_dist_atr"] is not None else 99,
         )
@@ -637,6 +766,16 @@ def build_desk_brief(ai_context: dict[str, Any]) -> dict[str, Any]:
     key_levels = _as_dict(ai_context.get("key_levels"))
     bias = _as_dict(ai_context.get("market_bias"))
     htf_dir = _direction_of(bias.get("htf"))
+
+    # One reference price + ATR scale for the whole brief (same snapshot).
+    ref_price = _num(key_levels.get("current_price"))
+    if ref_price is None:
+        ref_price = _num(_as_dict(mtf.get("M5")).get("price"))
+    work_atr = None
+    for _tf in ("M15", "M5"):
+        work_atr = _num(_as_dict(mtf.get(_tf)).get("atr14"))
+        if work_atr:
+            break
 
     flat: list[dict[str, Any]] = []
     blocks: dict[str, dict[str, Any]] = {}
@@ -659,9 +798,12 @@ def build_desk_brief(ai_context: dict[str, Any]) -> dict[str, Any]:
         where = locate_candle(last, atr, key_levels)
         sweep = detect_sweep(last, data.get("swings") or [])
         fields = _candle_fields(last)
+        rel, rel_dist = pattern_relevance(where, last, ref_price, work_atr or atr)
 
         blocks[tf] = {
             "tf": tf,
+            "rel": rel,
+            "rel_dist_atr": rel_dist,
             "candle": (
                 [_short_time(_as_dict(last).get("time_utc")), *map(lambda v: _r(v), fields)]
                 if fields
@@ -684,11 +826,13 @@ def build_desk_brief(ai_context: dict[str, Any]) -> dict[str, Any]:
                     else "searah" if item["dir"] == htf_dir else "melawan"
                 ),
             }
-            read["route"] = _route(read)
+            read["rel"] = rel
+            read["route"] = dict(_FAR_ROUTE) if rel == "far" else _route(read)
             flat.append(read)
 
     flat.sort(
         key=lambda r: (
+            r["rel"] == "far",
             r["family"] == "other",
             -_STRENGTH_RANK.get(r.get("strength"), 0),
             -_TF_WEIGHT.get(r["tf"], 0),
@@ -749,6 +893,8 @@ def build_desk_brief(ai_context: dict[str, Any]) -> dict[str, Any]:
 
     desks: list[str] = []
     for read in flat:
+        if read["rel"] == "far":
+            continue
         for desk in read["route"]["desk"]:
             if desk not in desks:
                 desks.append(desk)
@@ -759,6 +905,11 @@ def build_desk_brief(ai_context: dict[str, Any]) -> dict[str, Any]:
 
     brief: dict[str, Any] = {
         "price": _r(price),
+        "snapshot": {
+            "time_utc": ai_context.get("generated_at_utc"),
+            "price": _r(ref_price),
+            "atr_m15": _r(work_atr),
+        },
         "candle_format": "[time_utc,open,high,low,close] closed candle terakhir",
         "reads": reads,
         "no_pattern_tfs": no_pattern,
@@ -768,7 +919,8 @@ def build_desk_brief(ai_context: dict[str, Any]) -> dict[str, Any]:
         "setups": build_setups(ai_context, reads),
         "setups_note": (
             "Referensi dari level/scenario engine, BUKAN trade plan terkonfirmasi. "
-            "rr_at_ref = entry di entry_ref; now_* = entry di harga sekarang."
+            "ref = entry di level trigger (pending); now = entry di harga sekarang. "
+            "Semua angka sudah divalidasi backend (stop/target/RR)."
         ),
         "unavailable": ["FVG", "order block eksplisit", "fundamental/news"],
         "desks": desks,

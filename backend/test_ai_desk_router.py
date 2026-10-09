@@ -168,17 +168,23 @@ def test_setup_target_skips_noise_levels_and_rr_math_is_precomputed():
     by = {s["scenario"]: s for s in build_setups(_setup_ctx())}
     bear, bull = by["bearish_continuation"], by["bullish_reversal"]
 
+    # no ATR in this fixture: ATR checks are skipped and flagged
+    assert "atr_tidak_tersedia" in bear["ref"]["flags"]
     # bearish: risk@ref=5, min gap=2.5 -> 98.5 skipped (noise), target=95
-    assert bear["target_ref"] == 95.0
-    assert bear["rr_at_ref"] == 0.8          # (99-95)/5
+    assert bear["ref"]["target"] == 95.0
+    assert bear["ref"]["rr"] == 0.8          # (99-95)/5
+    assert "rr_di_bawah_1" in bear["ref"]["flags"]
     # market entry 100: risk=104-100=4, reward=100-95=5
-    assert (bear["now_risk"], bear["now_reward"], bear["now_rr"]) == (4.0, 5.0, 1.25)
+    now = bear["now"]
+    assert (now["risk"], now["reward"], now["rr"]) == (4.0, 5.0, 1.25)
+    assert bear["mode"] == "intraday"
 
     # bullish: risk@ref=1, min gap=0.5 -> 99.4 skipped, target=105
-    assert bull["target_ref"] == 105.0
-    assert bull["rr_at_ref"] == 6.0
-    # market entry 100: risk=100-98=2, reward=105-100=5
-    assert (bull["now_risk"], bull["now_reward"], bull["now_rr"]) == (2.0, 5.0, 2.5)
+    assert bull["ref"]["target"] == 105.0
+    assert bull["ref"]["rr"] == 6.0
+    assert "rr_tidak_wajar_tinggi" in bull["ref"]["flags"]   # RR 6 is suspicious
+    nowb = bull["now"]
+    assert (nowb["risk"], nowb["reward"], nowb["rr"]) == (2.0, 5.0, 2.5)
 
 
 def test_setup_now_invalid_when_price_beyond_stop_or_target():
@@ -188,7 +194,100 @@ def test_setup_now_invalid_when_price_beyond_stop_or_target():
     ctx["key_levels"]["current_price"] = 104.5   # above bearish stop 104
     ctx["scenarios"]["current_price"] = 104.5
     bear = [s for s in build_setups(ctx) if s["dir"] == "bearish"][0]
-    assert "now_rr" not in bear and "stop_ref" in bear["now_note"]
+    assert bear["now"]["verdict"] == "reject"
+    assert "melewati stop" in bear["now"]["note"] and "rr" not in bear["now"]
+
+
+def _xau_ctx(price=4133.945, resistances=(4134.379, 4138.864, 4145.0)):
+    """The exact shape of the case that produced a bogus 20R setup."""
+    return {
+        "key_levels": {
+            "current_price": price,
+            "supports": [{"price": 4131.238}, {"price": 4125.104}, {"price": 4120.0}],
+            "resistances": [{"price": r} for r in resistances],
+        },
+        "scenarios": {
+            "current_price": price,
+            "intraday_scenarios": [
+                {"name": "bearish_continuation", "direction": "bearish",
+                 "trigger_reference": 4131.238, "invalidation_reference": 4134.379,
+                 "atr_reference": 2.0, "conviction": "medium",
+                 "trigger_confirmed": False},
+            ],
+        },
+    }
+
+
+def test_tight_scenario_stop_is_replaced_not_sold_as_20R():
+    from app.services.ai.desk import build_setups
+
+    setup = build_setups(_xau_ctx())[0]
+    now = setup["now"]
+    # raw scenario stop is only 0.434 from price (0.22 ATR) -> naive RR ~20
+    assert now["raw_stop"] == 4134.379
+    assert now["stop_src"] == "struktur+buffer"
+    assert now["stop"] == 4139.364                # next resistance 4138.864 + 0.25*ATR(2.0)
+    assert now["stop_atr"] == 2.71                # 5.419 / 2.0
+    assert now["rr"] == 1.63                      # 8.841 / 5.419
+    assert now["rr"] < 5
+    assert now["verdict"] == "warn"
+    assert any(f.startswith("stop_scenario_terlalu_rapat") for f in now["flags"])
+    # pending view uses the real trigger with a healthy stop
+    ref = setup["ref"]
+    assert (ref["entry"], ref["stop"], ref["target"]) == (4131.238, 4134.379, 4125.104)
+    assert ref["rr"] == 1.95 and ref["verdict"] == "ok"
+
+
+def test_tight_stop_without_structure_falls_back_to_atr_stop():
+    from app.services.ai.desk import build_setups
+
+    now = build_setups(_xau_ctx(resistances=(4134.379,)))[0]["now"]
+    assert now["stop_src"] == "atr"
+    assert now["stop"] == 4135.945                # entry + 1.0 ATR
+    assert now["stop_atr"] == 1.0
+
+
+def test_target_too_close_and_wide_stop_are_flagged():
+    from app.services.ai.desk import _plan_view
+
+    lv = {"supports": [], "resistances": []}
+    close = _plan_view("bearish", 100.0, 101.5, 99.0, 2.0, lv, 100.0)
+    assert any(f.startswith("target_terlalu_dekat") for f in close["flags"])
+    wide = _plan_view("bearish", 100.0, 108.0, 90.0, 2.0, lv, 100.0)
+    assert any(f.startswith("stop_terlalu_lebar") for f in wide["flags"])
+    nt = _plan_view("bullish", 100.0, 98.0, None, 2.0, lv, 100.0)
+    assert nt["verdict"] == "reject" and "tidak_ada_target_layak" in nt["flags"]
+
+
+def test_pattern_relevance_far_pattern_is_not_evidence():
+    from app.services.ai.desk import pattern_relevance, build_setups
+
+    candle = {"open": 4132, "high": 4133, "low": 4130, "close": 4131}
+    far = pattern_relevance({"at": "resistance", "price": 4170.0}, candle, 4133.945, 2.0)
+    assert far[0] == "far"
+    near = pattern_relevance({"at": "support", "price": 4133.0}, candle, 4133.945, 2.0)
+    assert near[0] == "near"
+
+    reads = [{"tf": "H4", "rel": "far", "patterns": [
+        {"dir": "bearish", "family": "rejection", "names": ["tweezer_top"]}]}]
+    setup = build_setups(_xau_ctx(), reads)[0]
+    assert "patterns_for" not in setup           # far pattern never supports a setup
+
+
+def test_brief_has_snapshot_and_mode_labelled_blockers():
+    ctx = _xau_ctx()
+    ctx["scenarios"]["scalp_scenarios"] = [
+        {"name": "scalp_bearish", "direction": "bearish", "trigger_reference": 4132.409,
+         "invalidation_reference": 4134.9, "trigger_confirmed": False,
+         "breakout_status": "awaiting"}]
+    ctx["generated_at_utc"] = "2026-10-09T06:00:00+00:00"
+    ctx["multi_timeframe"] = {"M15": {"atr14": 2.0, "candles": [], "patterns": []}}
+    brief = build_desk_brief(ctx)
+    assert brief["snapshot"]["price"] == 4133.945
+    assert brief["snapshot"]["time_utc"] == "2026-10-09T06:00:00+00:00"
+    joined = " ".join(brief["entry_gate"]["blockers"])
+    assert "[scalp]" in joined and "[intraday]" in joined   # triggers never mixed
+    assert {s["mode"] for s in brief["setups"]} == {"intraday", "scalp"}
 
 
 def test_setup_patterns_only_support_same_direction():
@@ -199,6 +298,7 @@ def test_setup_patterns_only_support_same_direction():
         {"dir": "bullish", "family": "reversal_multi", "names": ["morning_star"]},
         {"dir": "neutral", "family": "indecision", "names": ["doji"]},
     ]}]
+    reads = [{**r, "rel": "near"} for r in reads]
     by = {s["dir"]: s for s in build_setups(_setup_ctx(), reads)}
     assert by["bearish"]["patterns_for"] == ["H1 displacement [bearish_engulfing]"]
     assert by["bearish"]["patterns_against"] == ["H1 reversal_multi [morning_star]"]
@@ -223,7 +323,7 @@ def test_ict_discount_favors_buy_and_killzone_flag():
 def test_chat_instruction_matches_frontend_renderer():
     from app.services.ai.reasoning import CHAT_SYSTEM_INSTRUCTION as S
 
-    for needle in ("DILARANG: tabel", "JANGAN menghitung ulang", "now_rr",
+    for needle in ("DILARANG: tabel", "JANGAN menghitung ulang", "verdict",
                    "discount mendukung BUY", "in_killzone", "jangan \"pip\""):
         assert needle in S, needle
 

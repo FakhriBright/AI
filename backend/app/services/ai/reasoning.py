@@ -39,16 +39,22 @@ CARA KERJA (seperti divisi di kantor):
 1. Jawab pertanyaan trader yang sebenarnya. Tidak ada format baku; panjang dan bentuk jawaban mengikuti pertanyaan.
 2. Cari bukti di `desk.reads`: tiap item = satu TF dengan candle closed terakhir (`candle` = [waktu,O,H,L,C]) + lokasinya (`where`, `sweep`) + daftar `patterns` (alias sudah digabung, jangan hitung ganda), masing-masing punya `route`. `route.desk` adalah divisi yang cocok (SNR = reaksi level, SMC = struktur/likuiditas, ICT = timing/retracement), `route.play` rencananya, `route.needs` syarat yang harus terjadi. Sebut candle-nya (TF dan OHLC), pola, lokasi, divisi mana yang menangani, lalu langkahnya. Jika `desk.no_pattern_tfs` memuat TF tersebut, katakan tidak ada pola; jangan mengarang.
 3. `desk.entry_gate.can_enter_now` menentukan ada/tidaknya entry. Jika false, katakan terus terang belum ada entry terkonfirmasi dan sebut `blockers` yang spesifik, jangan dilunakkan menjadi "mungkin".
-4. Trader tetap ingin entry / minta setup: tawarkan `desk.setups` sebagai SETUP BERSYARAT. Setiap setup punya DUA sudut RR yang sudah dihitung engine:
-   - `entry_ref`, `stop_ref`, `target_ref`, `rr_at_ref` = kalau menunggu harga ke entry_ref (pending order).
-   - `now_entry`, `now_risk`, `now_reward`, `now_rr` = kalau masuk SEKARANG di harga pasar dengan SL/TP yang sama. Jika trader bilang "entry sekarang", pakai angka now_*. Jika `now_note` terisi, sampaikan isinya.
-   Salin angka apa adanya. JANGAN menghitung ulang RR, SL, TP, atau jarak. Jika RR (now_rr atau rr_at_ref yang relevan) di bawah 1, katakan jelas bahwa reward lebih kecil dari risk.
+4. Trader tetap ingin entry / minta setup: tawarkan `desk.setups` sebagai SETUP BERSYARAT. Setiap setup punya dua tampilan yang SUDAH divalidasi backend:
+   - `ref` = menunggu harga ke level trigger (pending order).
+   - `now` = masuk SEKARANG di harga pasar. Jika trader bilang "entry sekarang", pakai `now`.
+   Tiap tampilan berisi entry, stop, target, risk, reward, rr, stop_atr (jarak SL dalam ATR), `stop_src`, `verdict` (ok/warn/reject) dan `flags`. Salin angka apa adanya; JANGAN menghitung ulang RR, SL, TP, atau jarak.
+   - `verdict` reject: jangan sajikan sebagai setup; jelaskan alasannya (`note`/`flags`).
+   - `verdict` warn: sampaikan setiap flag dengan bahasa natural (mis. target terlalu dekat, RR di bawah 1, stop terlalu lebar, entry jauh dari harga) dan jangan menyebutnya setup bagus.
+   - `raw_stop` muncul jika SL dari scenario terlalu rapat (noise/spread mudah menyentuhnya) dan sudah diganti SL struktur/ATR (`stop_src`). Pakai `stop` yang baru dan jelaskan singkat kenapa SL scenario tidak dipakai.
+   - RR tinggi BUKAN tanda setup bagus. Jika ada flag rr_tidak_wajar_tinggi, katakan angkanya mencurigakan dan jangan dijadikan alasan entry.
+   - Tiap setup punya `mode` (intraday/scalp) dengan trigger sendiri. Sebut mode-nya dan JANGAN mencampur trigger/level dari dua mode dalam satu rekomendasi.
    Pilih rekomendasi dari setup yang RR-nya lebih baik DAN bukti-nya lebih selaras (`patterns_for` vs `patterns_against`, bias HTF, vs_htf). Jika kedua setup jelek, katakan skip atau tunggu konfirmasi lebih baik daripada memaksa. Beri alternatif terbaik (tunggu retest/close konfirmasi, turun ke TF lebih kecil) dan ingatkan lot/risk tetap dari trade_plan.
-   Pola hanya boleh dipakai sebagai pendukung setup yang SEARAH. Pola bearish tidak mendukung buy, pola bullish tidak mendukung sell; gunakan `patterns_for`/`patterns_against` apa adanya.
+   Pola dengan `rel: far` (jauh dari harga sekarang) hanya konteks historis: jangan dipakai sebagai bukti entry dan jangan disebut sebagai alasan setup saat ini. Pola hanya boleh dipakai sebagai pendukung setup yang SEARAH. Pola bearish tidak mendukung buy, pola bullish tidak mendukung sell; gunakan `patterns_for`/`patterns_against` apa adanya.
 5. Pertanyaan menantang ("yakin?", "kenapa bearish?"): jawab dengan bukti pro dan kontra dari desk (struktur, EMA/RSI/MACD, candle, lokasi, vs_htf) dan beri tingkat keyakinan (rendah/sedang/tinggi) beserta alasannya.
 6. ICT: sebut killzone hanya jika `desk.ict.killzone.in_killzone` true; jika false, katakan sedang di luar killzone dan jangan menyebut jam sebagai killzone. `premium_discount.favors` menunjukkan sisi yang didukung: discount mendukung BUY (tidak mendukung sell), premium mendukung SELL. Jangan dibalik. Jika state `outside_range`, harga sudah keluar dari range swing: jangan pakai premium/discount. `desk.structure` (BOS/CHoCH kandidat) pakai hanya jika relevan.
 
 ATURAN DATA:
+- `desk.snapshot` adalah satu-satunya acuan harga dan waktu. Angka di PREVIOUS CONVERSATION bisa sudah usang; jika berbeda, pakai snapshot dan katakan harga sudah bergerak.
 - Hanya pakai angka dan pola yang ada di konteks. Jangan mengarang level, Entry/SL/TP/RR, indikator, pola, FVG/OB, atau berita. Yang ada di `desk.unavailable` bilang "tidak tersedia".
 - Pola candle bukan perintah entry; nilai dari lokasi, struktur, dan follow-through.
 - Teks `trade_plan.reasons/warnings` boleh mengutip candle live M1 yang belum close (cek trigger). Itu harga live, bukan bukti candle closed; bedakan keduanya saat menjelaskan.
@@ -127,7 +133,10 @@ class AIReasoningService:
             if role == "USER" and content.strip() == message.strip():
                 continue
             lines.append(f"{role}: {content}")
-        return ("\nPREVIOUS CONVERSATION:\n" + "\n".join(lines)) if lines else ""
+        return (
+            "\nPREVIOUS CONVERSATION (angka di sini bisa sudah usang; "
+            "selalu pakai konteks terbaru di atas):\n" + "\n".join(lines)
+        ) if lines else ""
 
     @staticmethod
     def _chat_prompt(context: dict[str, Any], history_text: str, message: str) -> str:
