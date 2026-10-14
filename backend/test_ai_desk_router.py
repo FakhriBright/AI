@@ -396,3 +396,11 @@ def test_rejected_risk_geometry_cannot_be_called_actionable():
     assert missing_atr["verdict"] == "reject"
     assert low_rr["verdict"] == "reject"
     assert close_target["verdict"] == "reject"
+
+
+def test_instructions_prevent_stale_trigger_order_after_confirmation():
+    from app.services.ai.reasoning import CHAT_SYSTEM_INSTRUCTION as S
+
+    assert "BUKAN instruksi untuk memasang pending order" in S
+    assert "jangan rekomendasikan order lama di level trigger" in S
+    assert "jangan menyebut jarak ke trigger berdasarkan candle close" in S

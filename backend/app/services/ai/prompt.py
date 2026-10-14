@@ -88,7 +88,12 @@ DESK BRIEF (deterministic router output in `desk`):
   `ref.order` describes order geometry only; it is NOT an execution instruction.
   `execution.place_order_now` is authoritative and false for scenario-reference
   setups. If `execution.status=wait_for_confirmation`, wait for the exact
-  `confirm_rule`, then reassess current price and a fresh plan. Never recommend
+  `confirm_rule`, then reassess current price and a fresh plan. The trigger-level
+  order type in `ref.order` is only a geometry snapshot; it is NOT a pending-order
+  recommendation. Never tell the user to wait for a candle close beyond a trigger
+  and then place a stop order back at that already-broken trigger. If confirmation
+  has happened, the old trigger entry is stale: require a fresh validated plan at
+  current price, or a retest if supported by the scenario evidence. Never recommend
   both a pending order at `ref.entry` and a market order after confirmation.
   Never mix prices from `ref`, `now`, and `trade_plan` in one plan. Copy values;
   never recompute. High RR is not quality: report `rr_tidak_wajar_tinggi`.
