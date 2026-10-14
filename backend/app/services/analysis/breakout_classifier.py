@@ -162,3 +162,37 @@ def classify_breakout(
                 )
 
     return BreakoutClassification(status="awaiting", direction="neutral", reasons=["No clear breakout direction established"])
+
+
+def classify_support_rejection(candles: list[Candle], level: float) -> BreakoutClassification:
+    """Confirm a bullish support rejection only when a CLOSED candle tests
+    the support and closes back above it. This is distinct from breaking above
+    resistance, which must not confirm a support-reversal scenario.
+    """
+    if not candles:
+        return BreakoutClassification(
+            status="awaiting", direction="neutral", reasons=["No candles provided"]
+        )
+
+    current = candles[-1]
+    touched_support = current.low <= level
+    reclaimed_support = current.close > level
+
+    if touched_support and reclaimed_support:
+        return BreakoutClassification(
+            status="pullback_valid",
+            direction="bullish",
+            reasons=["Closed candle tested support and reclaimed it"],
+        )
+
+    if touched_support and not reclaimed_support:
+        return BreakoutClassification(
+            status="false_breakout",
+            direction="bearish",
+            reasons=["Support was tested but the candle did not close back above it"],
+        )
+
+    return BreakoutClassification(
+        status="awaiting", direction="neutral",
+        reasons=["Closed candle has not tested support"],
+    )

@@ -5,6 +5,7 @@ from app.services.ai.desk import detect_fvg_order_blocks
 from app.services.ai.serializer import fingerprint_context
 from app.services.analysis.pipeline import _select_scenario
 from app.services.analysis.scenario import Scenario, ScenarioAnalysis
+from app.services.analysis.breakout_classifier import classify_support_rejection
 
 
 def _c(o, h, low, close, minute):
@@ -75,3 +76,27 @@ def test_fingerprint_ignores_only_narrative_only_trade_plan_fields():
     }
     assert fingerprint_context(base) == fingerprint_context(changed_notes)
     assert fingerprint_context(base) != fingerprint_context(changed_state)
+
+
+def test_bullish_reversal_confirmation_uses_support_rejection_not_resistance_break():
+    # A close above support after touching it is valid; merely trading above
+    # support without touching it is not a confirmed reversal.
+    touched_and_reclaimed = SimpleNamespace(low=99.5, high=101.0, close=100.4)
+    no_touch = SimpleNamespace(low=100.2, high=101.2, close=100.8)
+    failed_reclaim = SimpleNamespace(low=99.4, high=100.3, close=99.8)
+
+    assert classify_support_rejection([touched_and_reclaimed], 100).status == "pullback_valid"
+    assert classify_support_rejection([no_touch], 100).status == "awaiting"
+    assert classify_support_rejection([failed_reclaim], 100).status == "false_breakout"
+
+
+def test_fvg_is_not_marked_touched_by_candle_entirely_below_zone():
+    candles = [
+        _c(9.8, 10.0, 9.5, 9.9, 0),
+        _c(10.0, 10.4, 9.8, 10.3, 1),
+        _c(10.5, 11.2, 10.5, 11.0, 2),  # bullish FVG from 10.0 to 10.5
+        _c(9.4, 9.8, 9.1, 9.5, 3),      # below the gap; no overlap
+    ]
+    result = detect_fvg_order_blocks(candles, current_price=9.6, atr=1.0)
+    bullish = next(z for z in result["fvg"] if z["direction"] == "bullish")
+    assert bullish["fresh"] is True

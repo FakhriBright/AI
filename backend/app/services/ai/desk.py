@@ -916,10 +916,16 @@ def detect_fvg_order_blocks(
         first, middle, third = rows[i - 2], rows[i - 1], rows[i]
         if third["low"] > first["high"]:
             side, lower, upper = "bullish", first["high"], third["low"]
-            touched = any(row["low"] <= upper for row in rows[i + 1:])
+            touched = any(
+                row["low"] <= upper and row["high"] >= lower
+                for row in rows[i + 1:]
+            )
         elif third["high"] < first["low"]:
             side, lower, upper = "bearish", third["high"], first["low"]
-            touched = any(row["high"] >= lower for row in rows[i + 1:])
+            touched = any(
+                row["low"] <= upper and row["high"] >= lower
+                for row in rows[i + 1:]
+            )
         else:
             continue
         fvgs[side] = {

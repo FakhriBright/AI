@@ -5,7 +5,10 @@ from typing import Literal, Any
 from app.services.analysis.context import MultiTimeframeContext
 from app.services.analysis.bias import MarketBias
 from app.services.analysis.levels import KeyLevels, LevelZone
-from app.services.analysis.breakout_classifier import classify_breakout
+from app.services.analysis.breakout_classifier import (
+    classify_breakout,
+    classify_support_rejection,
+)
 from app.services.technical.candlestick_patterns import detect_patterns
 
 
@@ -190,7 +193,7 @@ def build_scenarios(
     if bias.htf.direction == "bullish": bullish_reasons.append("htf_bias_bullish")
     if bias.intraday.direction == "bullish": bullish_reasons.append("intraday_bias_bullish")
     
-    b_out2 = classify_breakout(candles_m15, resistance_price, "resistance", "bullish") if resistance_price and candles_m15 else None
+    b_out2 = classify_support_rejection(candles_m15, support_price) if support_price is not None and candles_m15 else None
     breakout_status_bu = b_out2.status if b_out2 else "awaiting"
     
     is_fresh_bu = False
