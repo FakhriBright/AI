@@ -167,7 +167,7 @@ def build_scenarios(
     intraday_scenarios.append(Scenario(
         name="bearish_continuation",
         direction="bearish",
-        status="active" if conv_b == "high" else "conditional",
+        status="active" if conv_b == "high" and breakout_status_b in ["true_breakout", "pullback_valid"] else "conditional",
         trigger=f"break_and_hold_below_support_{support_price}" if support_price else "break_below_nearest_support",
         invalidation=f"price_reclaims_above_nearest_resistance_{resistance_price}" if resistance_price else "price_reclaims_nearest_resistance",
         breakout_status=breakout_status_b,
@@ -205,7 +205,7 @@ def build_scenarios(
     intraday_scenarios.append(Scenario(
         name="bullish_reversal",
         direction="bullish",
-        status="active" if conv_bu == "high" else "conditional",
+        status="active" if conv_bu == "high" and breakout_status_bu in ["true_breakout", "pullback_valid"] else "conditional",
         trigger=f"hold_and_reject_from_support_{support_price}" if support_price else "bullish_rejection_from_support",
         invalidation=f"break_below_support_buffer_{bullish_inv_ref}" if bullish_inv_ref else "break_below_nearest_support",
         breakout_status=breakout_status_bu,
@@ -245,7 +245,7 @@ def build_scenarios(
         scalp_scenarios.append(Scenario(
             name=f"scalp_{scalp_dir}_{rel_to_htf}",
             direction=scalp_dir,
-            status="active" if conv_scalp == "high" else "conditional",
+            status="active" if conv_scalp == "high" and b_status_scalp in ["true_breakout", "pullback_valid"] else "conditional",
             trigger=f"bounce_at_zone_{sd_price}" if sd_price else "momentum_continuation",
             invalidation=f"break_zone_{sd_price}" if sd_price else "momentum_loss",
             breakout_status=b_status_scalp,

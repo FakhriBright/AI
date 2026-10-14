@@ -126,29 +126,50 @@ def _select_scenario(
     scenario_analysis: ScenarioAnalysis,
     bias: MarketBias,
 ) -> Scenario:
+    """Choose the strongest evidence-backed candidate, not just overall bias.
+
+    Confluence/conviction and actual trigger state lead. HTF alignment is a
+    tie-breaker/penalty, so a valid counter-trend scalp can still win when its
+    evidence is materially stronger, without hiding the conflict from the AI.
+    """
     scenarios = scenario_analysis.scenarios
+    if not scenarios:
+        raise ValueError("Cannot select a scenario from an empty candidate set")
 
-    scenario_by_name = {
-        scenario.name: scenario
-        for scenario in scenarios
-    }
+    conviction_rank = {"high": 3, "medium": 2, "low": 1}
+    invalid_status = {"invalidated", "rejected"}
 
-    if bias.overall == "bullish":
-        return scenario_by_name.get(
-            "bullish_reversal",
-            scenarios[0],
+    def rank(scenario: Scenario) -> tuple[float, ...]:
+        direction = scenario.direction
+        score = float(scenario.confluence_score or 0)
+        score += conviction_rank.get(scenario.conviction, 0) * 4
+        if scenario.trigger_confirmed:
+            score += 22
+        if scenario.breakout_status in {"true_breakout", "pullback_valid"}:
+            score += 8
+        if scenario.near_trigger:
+            score += 3
+        if scenario.status in invalid_status:
+            score -= 100
+        if scenario.trigger_reference is None:
+            score -= 8
+
+        # Higher-timeframe alignment is important but not an absolute veto.
+        if bias.htf.direction in {"bullish", "bearish"}:
+            score += 7 if direction == bias.htf.direction else -7
+        if bias.intraday.direction in {"bullish", "bearish"}:
+            score += 3 if direction == bias.intraday.direction else -3
+
+        distance = scenario.trigger_distance_atr
+        proximity = -(float(distance) if distance is not None else 99.0)
+        return (
+            score,
+            1.0 if scenario.trigger_confirmed else 0.0,
+            float(scenario.confluence_score or 0),
+            proximity,
         )
 
-    if bias.overall == "bearish":
-        return scenario_by_name.get(
-            "bearish_continuation",
-            scenarios[0],
-        )
-
-    return scenario_by_name.get(
-        "range_or_no_clear_setup",
-        scenarios[0],
-    )
+    return max(scenarios, key=rank)
 
 
 def _provider_identity(ai_service: AIReasoningService) -> tuple[str, str]:

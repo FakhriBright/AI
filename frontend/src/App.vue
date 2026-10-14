@@ -135,8 +135,6 @@ async function checkBridgeHealth() {
   }
 }
 
-const lastKnownCandleTime = ref(null)
-
 async function fetchAnalysis() {
   if (!loggedIn.value) return
 
@@ -151,9 +149,6 @@ async function fetchAnalysis() {
     if (selectedSymbol.value !== targetSymbol) return
 
     analysisData.value = data
-    if (data?.latest_candle?.time_utc) {
-      lastKnownCandleTime.value = data.latest_candle.time_utc
-    }
   } catch (err) {
     if (selectedSymbol.value !== targetSymbol) return
 
@@ -191,7 +186,6 @@ async function fetchLiveTick() {
 function handleSelectSymbol(newSymbol) {
   if (selectedSymbol.value === newSymbol) return
   selectedSymbol.value = newSymbol
-  lastKnownCandleTime.value = null
   analysisData.value = null
   liveTick.value = null
   fetchAnalysis()
@@ -202,14 +196,9 @@ async function handleAutoRefresh() {
   if (!loggedIn.value || isAnalysisLoading.value) return
   await checkBridgeHealth()
 
-  // Skip triggering full analysis/AI if market candle timestamp has not changed
-  if (analysisData.value?.latest_candle?.time_utc) {
-    const currentCandleTime = analysisData.value.latest_candle.time_utc
-    if (lastKnownCandleTime.value && lastKnownCandleTime.value === currentCandleTime) {
-      return
-    }
-  }
-
+  // Refresh the analysis snapshot on schedule. Live ticks are polled separately
+  // every 2s; the backend AI fingerprint cache avoids repeated token use when
+  // the structured market evidence has not materially changed.
   await fetchAnalysis()
 }
 

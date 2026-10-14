@@ -287,4 +287,13 @@ def fingerprint_context(ai_context: dict[str, Any]) -> dict[str, Any]:
     """
     payload = deepcopy(ai_context)
     payload.pop("generated_at_utc", None)
+
+    # These narrative lists may quote the still-forming M1 candle and change
+    # on each poll. They should not alone trigger another paid LLM call. Keep
+    # status, confirmation, entry/stop/target, and scenario fields in the key:
+    # a meaningful state transition still invalidates the cache.
+    trade_plan = payload.get("trade_plan")
+    if isinstance(trade_plan, dict):
+        trade_plan.pop("reasons", None)
+        trade_plan.pop("warnings", None)
     return payload

@@ -1,3 +1,4 @@
+import copy
 import logging
 from typing import Any
 
@@ -58,7 +59,7 @@ CARA KERJA (seperti divisi di kantor):
    Pilih rekomendasi dari setup yang RR-nya lebih baik DAN bukti-nya lebih selaras (`patterns_for` vs `patterns_against`, bias HTF, vs_htf). Jika kedua setup jelek, katakan skip atau tunggu konfirmasi lebih baik daripada memaksa. Beri alternatif terbaik (tunggu retest/close konfirmasi, turun ke TF lebih kecil) dan ingatkan lot/risk tetap dari trade_plan.
    Pola dengan `rel: far` (jauh dari harga sekarang) hanya konteks historis: jangan dipakai sebagai bukti entry dan jangan disebut sebagai alasan setup saat ini. Pola hanya boleh dipakai sebagai pendukung setup yang SEARAH. Pola bearish tidak mendukung buy, pola bullish tidak mendukung sell; gunakan `patterns_for`/`patterns_against` apa adanya.
 5. Pertanyaan menantang ("yakin?", "kenapa bearish?"): jawab dengan bukti pro dan kontra dari desk (struktur, EMA/RSI/MACD, candle, lokasi, vs_htf) dan beri tingkat keyakinan (rendah/sedang/tinggi) beserta alasannya.
-6. ICT: sebut killzone hanya jika `desk.ict.killzone.in_killzone` true; jika false, katakan sedang di luar killzone dan jangan menyebut jam sebagai killzone. `premium_discount.favors` menunjukkan sisi yang didukung: discount mendukung BUY (tidak mendukung sell), premium mendukung SELL. Jangan dibalik. Jika state `outside_range`, harga sudah keluar dari range swing: jangan pakai premium/discount. `desk.structure` (BOS/CHoCH kandidat) pakai hanya jika relevan.
+6. ICT/SMC: sebut killzone hanya jika `desk.ict.killzone.in_killzone` true; jika false, katakan sedang di luar killzone dan jangan menyebut jam sebagai killzone. `premium_discount.favors` menunjukkan sisi yang didukung: discount mendukung BUY (tidak mendukung sell), premium mendukung SELL. Jangan dibalik. Jika state `outside_range`, harga sudah keluar dari range swing: jangan pakai premium/discount. `desk.ict.fvg_order_blocks` adalah satu-satunya sumber FVG/OB; kutip timeframe, batas, arah dan freshness persis dari sana. Zona/pola/struktur memakai candle CLOSED; live tick bukan konfirmasi candle close. `desk.structure` (BOS/CHoCH kandidat) pakai hanya jika relevan.
 
 ATURAN DATA:
 - `desk.snapshot` adalah satu-satunya acuan harga dan waktu. Angka di PREVIOUS CONVERSATION bisa sudah usang; jika berbeda, pakai snapshot dan katakan harga sudah bergerak.
@@ -199,6 +200,21 @@ class AIReasoningService:
         # 413 from the provider: retry once with a much smaller context and
         # shorter history so the trader still gets an answer.
         small = shrink_to_budget(context, budget // 2)
+        # The original context may already be below the character budget even
+        # though the provider rejected the complete prompt. Force a real
+        # reduction for the retry instead of accidentally resending the same
+        # payload (notably after adding compact FVG/OB evidence).
+        if dumps(small) == dumps(context):
+            small = copy.deepcopy(context)
+            small.pop("multi_timeframe", None)
+            desk = small.get("desk")
+            if isinstance(desk, dict):
+                desk.pop("structure", None)
+                ict = desk.get("ict")
+                if isinstance(ict, dict):
+                    ict.pop("fvg_order_blocks", None)
+                if isinstance(desk.get("setups"), list):
+                    desk["setups"] = desk["setups"][:1]
         return _cleaned(
             await self.provider.analyze(
                 {

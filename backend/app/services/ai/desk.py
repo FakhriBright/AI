@@ -882,6 +882,108 @@ def build_setups(
 
 
 # --------------------------------------------------------------------------
+# deterministic SMC/ICT evidence from CLOSED candles
+# --------------------------------------------------------------------------
+
+def detect_fvg_order_blocks(
+    candles: list[Any],
+    current_price: float | None = None,
+    atr: float | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Detect recent 3-candle FVGs and opposing-candle OBs deterministically.
+
+    Input candles are the compact, closed-candle evidence produced by the
+    serializer. The helper does not infer zones from AI prose or live forming
+    candles. It returns at most the latest bullish and bearish zone per type.
+    """
+    rows = []
+    for candle in candles or []:
+        fields = _candle_fields(candle)
+        if fields is None:
+            continue
+        o, h, lo, c = fields
+        rows.append({
+            "time": _as_dict(candle).get("time_utc"),
+            "open": o, "high": h, "low": lo, "close": c,
+        })
+
+    if len(rows) < 3:
+        return {"fvg": [], "order_blocks": []}
+
+    fvgs: dict[str, dict[str, Any]] = {}
+    # Classic ICT 3-candle imbalance: candle 1 and 3 do not overlap.
+    for i in range(2, len(rows)):
+        first, middle, third = rows[i - 2], rows[i - 1], rows[i]
+        if third["low"] > first["high"]:
+            side, lower, upper = "bullish", first["high"], third["low"]
+            touched = any(row["low"] <= upper for row in rows[i + 1:])
+        elif third["high"] < first["low"]:
+            side, lower, upper = "bearish", third["high"], first["low"]
+            touched = any(row["high"] >= lower for row in rows[i + 1:])
+        else:
+            continue
+        fvgs[side] = {
+            "direction": side,
+            "low": _r(lower), "high": _r(upper),
+            "formed_at": _short_time(third["time"]),
+            "fresh": not touched,
+            "distance_atr": _r(
+                max(lower - current_price, current_price - upper, 0) / atr, 2
+            ) if current_price is not None and atr else None,
+        }
+
+    order_blocks: dict[str, dict[str, Any]] = {}
+    for i in range(1, len(rows)):
+        impulse = rows[i]
+        history = rows[max(0, i - 14):i]
+        if not history:
+            continue
+        avg_body = sum(abs(c["close"] - c["open"]) for c in history) / len(history)
+        body = abs(impulse["close"] - impulse["open"])
+        if avg_body <= 0 or body < avg_body * 1.5:
+            continue
+
+        base = rows[i - 1]
+        impulse_dir = (
+            "bullish" if impulse["close"] > impulse["open"]
+            else "bearish" if impulse["close"] < impulse["open"]
+            else None
+        )
+        if impulse_dir == "bullish" and base["close"] < base["open"]:
+            side = "bullish"
+        elif impulse_dir == "bearish" and base["close"] > base["open"]:
+            side = "bearish"
+        else:
+            continue
+
+        lower, upper = base["low"], base["high"]
+        later = rows[i + 1:]
+        touched = any(
+            row["low"] <= upper and row["high"] >= lower for row in later
+        )
+        order_blocks[side] = {
+            "direction": side,
+            "low": _r(lower), "high": _r(upper),
+            "formed_at": _short_time(base["time"]),
+            "impulse_at": _short_time(impulse["time"]),
+            "fresh": not touched,
+            "distance_atr": _r(
+                max(lower - current_price, current_price - upper, 0) / atr, 2
+            ) if current_price is not None and atr else None,
+        }
+
+    # Prefer nearest zones when price is known; otherwise retain the latest.
+    def zone_order(zone: dict[str, Any]) -> tuple[float, str]:
+        dist = _num(zone.get("distance_atr"))
+        return (dist if dist is not None else 999.0, str(zone.get("formed_at") or ""))
+
+    return {
+        "fvg": sorted(fvgs.values(), key=zone_order),
+        "order_blocks": sorted(order_blocks.values(), key=zone_order),
+    }
+
+
+# --------------------------------------------------------------------------
 # the brief
 # --------------------------------------------------------------------------
 
@@ -1015,6 +1117,24 @@ def build_desk_brief(ai_context: dict[str, Any]) -> dict[str, Any]:
     if pd:
         ict["premium_discount"] = pd
 
+    # Explicit FVG/OB evidence is derived from the same CLOSED candles that
+    # drive pattern/structure analysis. Keep the payload compact: latest
+    # bullish/bearish zone per type and selected structural timeframes only.
+    zone_evidence: dict[str, Any] = {}
+    for tf in STRUCT_TFS:
+        data = _as_dict(mtf.get(tf))
+        if not data:
+            continue
+        zones = detect_fvg_order_blocks(
+            data.get("candles") or [],
+            current_price=price,
+            atr=_num(data.get("atr14")),
+        )
+        if zones["fvg"] or zones["order_blocks"]:
+            zone_evidence[tf] = zones
+    if zone_evidence:
+        ict["fvg_order_blocks"] = zone_evidence
+
     desks: list[str] = []
     for read in flat:
         if read["rel"] == "far":
@@ -1024,6 +1144,10 @@ def build_desk_brief(ai_context: dict[str, Any]) -> dict[str, Any]:
                 desks.append(desk)
     if "SNR" not in desks:
         desks.append("SNR")
+    if any(zones.get("fvg") for zones in zone_evidence.values()) and "ICT" not in desks:
+        desks.append("ICT")
+    if any(zones.get("order_blocks") for zones in zone_evidence.values()) and "SMC" not in desks:
+        desks.append("SMC")
     if (kz or {}).get("active") and "ICT" not in desks:
         desks.append("ICT")
 
@@ -1046,7 +1170,12 @@ def build_desk_brief(ai_context: dict[str, Any]) -> dict[str, Any]:
             "ref = entry di level trigger (pending); now = entry di harga sekarang. "
             "Semua angka sudah divalidasi backend (stop/target/RR)."
         ),
-        "unavailable": ["FVG", "order block eksplisit", "fundamental/news"],
+        "unavailable": ["fundamental/news"],
+        "candle_evidence_policy": {
+            "patterns_structure_fvg_ob": "closed candles only",
+            "live_price": "separate live tick; not a closed-candle confirmation",
+            "entry_confirmation": "must satisfy deterministic trigger/confirmation fields",
+        },
         "desks": desks,
     }
     return brief
@@ -1247,6 +1376,23 @@ def _drop_structure(ctx: dict[str, Any]) -> None:
     _as_dict(ctx.get("desk")).pop("structure", None)
 
 
+def _trim_ict_zones(ctx: dict[str, Any]) -> None:
+    zones_by_tf = _as_dict(_as_dict(ctx.get("desk")).get("ict")).get("fvg_order_blocks")
+    if not isinstance(zones_by_tf, dict):
+        return
+    for zones in zones_by_tf.values():
+        if not isinstance(zones, dict):
+            continue
+        for key in ("fvg", "order_blocks"):
+            if isinstance(zones.get(key), list):
+                zones[key] = zones[key][:1]
+
+
+def _drop_ict_zones(ctx: dict[str, Any]) -> None:
+    ict = _as_dict(_as_dict(ctx.get("desk")).get("ict"))
+    ict.pop("fvg_order_blocks", None)
+
+
 # Lowest-value data goes first; candle evidence is trimmed last.
 _SHRINK_STEPS = (
     _drop_rationale,
@@ -1255,7 +1401,9 @@ _SHRINK_STEPS = (
     lambda c: _cut_candles(c, 4),
     lambda c: _cut_candles(c, 3),
     _cut_desk,
+    _trim_ict_zones,
     lambda c: _cut_candles(c, 2),
+    _drop_ict_zones,
     _drop_structure,
     _drop_mtf,
 )

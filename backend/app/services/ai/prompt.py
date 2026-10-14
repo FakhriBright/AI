@@ -96,6 +96,13 @@ DESK BRIEF (deterministic router output in `desk`):
   implausible target/stop distances; do not present them as actionable.
   Patterns with `rel: far` are historical context, never entry evidence.
   Do not mix triggers from different `mode` (intraday/scalp).
+- `desk.ict.fvg_order_blocks` contains deterministic FVG and order-block
+  zones derived only from CLOSED candles. Quote exact timeframe, bounds,
+  direction, freshness and distance when present. If a timeframe has no
+  zone listed, say no qualifying zone was detected; never invent one.
+- `desk.candle_evidence_policy` is authoritative: patterns, structure, FVG
+  and OB use CLOSED candles; the live tick/forming M1 candle is a separate
+  trigger check and is not closed-candle confirmation.
 - `desk.unavailable` lists data the engine does not provide: say "tidak
   tersedia" for those, never estimate them."""
 
@@ -182,8 +189,9 @@ CANDLESTICK PATTERN INTERPRETATION (SMC/ICT/SNR context):
   requires a bullish close on the next candle for confirmation.
 - BOS/CHoCH must reference a specific confirmed swing level with a body
   close through it. Wick sweeps are liquidity grabs, not BOS.
-- FVG bounds must come from deterministic context only. If absent, say
-  'FVG data unavailable'; do not estimate.
+- FVG/OB bounds and freshness must come from `desk.ict.fvg_order_blocks`
+  only. If that structure is absent or empty for a timeframe, say no
+  qualifying zone was detected; do not estimate from candle prose.
 - Avoid counting the same formation under multiple pattern aliases as
   independent confluence votes (e.g., pin_bar and hammer on the same candle
   count as one evidence family)."""
