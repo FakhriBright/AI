@@ -1,5 +1,5 @@
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal, Any
 
 from app.services.analysis.context import MultiTimeframeContext
@@ -135,8 +135,17 @@ def build_scenarios(
 ) -> ScenarioAnalysis:
     current_price = levels.current_price
 
-    nearest_support = levels.supports[0] if levels.supports else None
-    nearest_resistance = levels.resistances[0] if levels.resistances else None
+    # A support candidate must be at/below current price and resistance
+    # candidates must be at/above it; absolute-nearest can otherwise select a
+    # level on the wrong side of price and invert the setup geometry.
+    nearest_support = next(
+        (zone for zone in levels.supports if zone.price < current_price),
+        None,
+    )
+    nearest_resistance = next(
+        (zone for zone in levels.resistances if zone.price > current_price),
+        None,
+    )
     
     support_price = nearest_support.price if nearest_support else None
     resistance_price = nearest_resistance.price if nearest_resistance else None
@@ -160,10 +169,9 @@ def build_scenarios(
     breakout_status_b = b_out.status if b_out else "awaiting"
     patterns_b = detect_patterns(candles_m15, at_zone=True) if candles_m15 else []
     
+    # A fresh demand zone at support is opposing evidence for a bearish
+    # breakdown, not a bullish confluence bonus.
     is_fresh_b = False
-    for dz in levels.demand_zones:
-        if support_price and abs(dz.price - support_price) < 0.001 and dz.is_fresh:
-            is_fresh_b = True
             
     score_b, conv_b = _score_confluence(context, "bearish", breakout_status_b, patterns_b, is_fresh_b, has_conflict)
     
@@ -196,10 +204,13 @@ def build_scenarios(
     b_out2 = classify_support_rejection(candles_m15, support_price) if support_price is not None and candles_m15 else None
     breakout_status_bu = b_out2.status if b_out2 else "awaiting"
     
-    is_fresh_bu = False
-    for sz in levels.supply_zones:
-        if resistance_price and abs(sz.price - resistance_price) < 0.001 and sz.is_fresh:
-            is_fresh_bu = True
+    # A bullish support-rejection setup is supported by demand, not supply.
+    is_fresh_bu = any(
+        support_price is not None
+        and abs(dz.price - support_price) < 0.001
+        and dz.is_fresh
+        for dz in levels.demand_zones
+    )
 
     score_bu, conv_bu = _score_confluence(context, "bullish", breakout_status_bu, patterns_b, is_fresh_bu, has_conflict)
     
@@ -264,6 +275,71 @@ def build_scenarios(
             near_trigger=_is_near_level(abs(current_price - sd_price) if sd_price else None, atr_scalp),
             trigger_confirmed=(b_status_scalp in ["true_breakout", "pullback_valid"]),
             rationale=[f"entry_bias_{scalp_dir}", rel_to_htf] + (b_out_scalp.reasons if b_out_scalp else [])
+        ))
+
+    # Evaluate additional nearby support levels as distinct candidates. A single
+    # nearest-level scenario can have poor RR while a valid second level offers
+    # a better conditional setup; preserve both for ranking instead of hiding it.
+    base_bearish = intraday_scenarios[0]
+    base_bullish = intraday_scenarios[1]
+    extra_supports = [
+        zone for zone in levels.supports
+        if zone.price < current_price
+        and (support_price is None or abs(zone.price - support_price) > 1e-9)
+    ][:2]
+
+    for index, zone in enumerate(extra_supports, start=2):
+        level = zone.price
+        bearish_result = classify_breakout(
+            candles_m15, level, "support", "bearish"
+        ) if candles_m15 else None
+        bearish_status = bearish_result.status if bearish_result else "awaiting"
+        bearish_score, bearish_conviction = _score_confluence(
+            context, "bearish", bearish_status, patterns_b, zone.is_fresh, has_conflict
+        )
+        intraday_scenarios.append(replace(
+            base_bearish,
+            name=f"bearish_continuation_support_{index}",
+            status="active" if bearish_conviction == "high" and bearish_status in {"true_breakout", "pullback_valid"} else "conditional",
+            trigger=f"break_and_hold_below_support_{level}",
+            invalidation=f"price_reclaims_above_nearest_resistance_{resistance_price}" if resistance_price else "price_reclaims_nearest_resistance",
+            breakout_status=bearish_status,
+            conviction=bearish_conviction,
+            confluence_score=bearish_score,
+            trigger_reference=level,
+            trigger_distance=abs(current_price - level),
+            trigger_distance_atr=_distance_ratio(abs(current_price - level), atr_intraday),
+            near_trigger=_is_near_level(abs(current_price - level), atr_intraday),
+            trigger_confirmed=(bearish_status in {"true_breakout", "pullback_valid"}),
+            rationale=bearish_reasons + (bearish_result.reasons if bearish_result else []) + ["alternative_support_candidate"],
+        ))
+
+        bullish_result = classify_support_rejection(
+            candles_m15, level
+        ) if candles_m15 else None
+        bullish_status = bullish_result.status if bullish_result else "awaiting"
+        bullish_score, bullish_conviction = _score_confluence(
+            context, "bullish", bullish_status, patterns_b, zone.is_fresh, has_conflict
+        )
+        bullish_invalidation = level - (atr_intraday * 0.25) if atr_intraday else None
+        intraday_scenarios.append(replace(
+            base_bullish,
+            name=f"bullish_reversal_support_{index}",
+            status="active" if bullish_conviction == "high" and bullish_status in {"true_breakout", "pullback_valid"} else "conditional",
+            trigger=f"hold_and_reject_from_support_{level}",
+            invalidation=f"break_below_support_buffer_{bullish_invalidation}" if bullish_invalidation else f"break_below_support_{level}",
+            breakout_status=bullish_status,
+            conviction=bullish_conviction,
+            confluence_score=bullish_score,
+            trigger_reference=level,
+            invalidation_reference=bullish_invalidation,
+            trigger_distance=abs(current_price - level),
+            invalidation_distance=abs(current_price - bullish_invalidation) if bullish_invalidation is not None else None,
+            trigger_distance_atr=_distance_ratio(abs(current_price - level), atr_intraday),
+            invalidation_distance_atr=_distance_ratio(abs(current_price - bullish_invalidation) if bullish_invalidation is not None else None, atr_intraday),
+            near_trigger=_is_near_level(abs(current_price - level), atr_intraday),
+            trigger_confirmed=(bullish_status in {"true_breakout", "pullback_valid"}),
+            rationale=bullish_reasons + (bullish_result.reasons if bullish_result else []) + ["alternative_support_candidate"],
         ))
 
     return ScenarioAnalysis(

@@ -219,18 +219,23 @@ async def _build_deterministic(
         bias=bias,
     )
 
-    candles = await provider.get_candles(
-        symbol=symbol,
-        timeframe="M1",
-        count=2,
+    # Confirm against the latest CLOSED candle on the timeframe that produced
+    # the setup evidence. The previous M1 fetch could use a still-forming bar
+    # to confirm an M15 setup, making the entry state inconsistent with the
+    # breakout classifier and candle-pattern evidence.
+    confirmation_tf = (
+        "M5" if selected_scenario.name.startswith("scalp_") else "M15"
     )
-
-    if not candles:
+    confirmation_data = context.timeframes.get(confirmation_tf)
+    confirmation_candles = (
+        confirmation_data.candles if confirmation_data is not None else []
+    )
+    if not confirmation_candles:
         raise RuntimeError(
-            f"No M1 candles returned for {symbol}"
+            f"No closed {confirmation_tf} candles available for {symbol}"
         )
 
-    latest_candle = candles[-1]
+    latest_candle = confirmation_candles[-1]
 
     confirmation = confirm_scenario(
         context=context,

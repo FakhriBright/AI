@@ -269,10 +269,22 @@ def build_trade_plan(
     rr_ratio: float | None = None
 
     if stop_plan is not None and levels is not None:
-        if scenario.direction == "bullish" and levels.resistances:
-            target_price = levels.resistances[0].price
-        elif scenario.direction == "bearish" and levels.supports:
-            target_price = levels.supports[0].price
+        # Targets must lie beyond entry in the trade direction. The old code
+        # always picked index 0 (the nearest level to current price), which can
+        # be the very trigger level or even the wrong side of an already-moved
+        # entry, yielding misleading/undefined reward geometry.
+        if scenario.direction == "bullish":
+            valid_targets = [
+                zone.price for zone in levels.resistances
+                if zone.price > stop_plan.entry_price
+            ]
+            target_price = min(valid_targets) if valid_targets else None
+        elif scenario.direction == "bearish":
+            valid_targets = [
+                zone.price for zone in levels.supports
+                if zone.price < stop_plan.entry_price
+            ]
+            target_price = max(valid_targets) if valid_targets else None
 
         if target_price is not None:
             try:
