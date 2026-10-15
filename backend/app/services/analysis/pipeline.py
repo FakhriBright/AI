@@ -228,7 +228,7 @@ async def _build_deterministic(
     )
     confirmation_data = context.timeframes.get(confirmation_tf)
     confirmation_candles = (
-        confirmation_data.candles if confirmation_data is not None else []
+        confirmation_data.evidence_candles if confirmation_data is not None else []
     )
     if not confirmation_candles:
         raise RuntimeError(
