@@ -297,6 +297,29 @@ def build_trade_plan(
             except ValueError:
                 rr_ratio = None
 
+    if target_price is None or rr_ratio is None:
+        warnings.append("No valid target beyond entry; trade plan is not actionable")
+        return TradePlan(
+            symbol=symbol,
+            scenario_name=scenario.name,
+            direction=scenario.direction,
+            status="confirmed_needs_target",
+            entry_price=stop_plan.entry_price,
+            stop_price=stop_plan.stop_price,
+            stop_distance=stop_plan.stop_distance,
+            confirmation_type=confirmation.confirmation_type,
+            stop_method=stop_plan.method,
+            market_bias=market_bias,
+            htf_bias=htf_bias,
+            intraday_bias=intraday_bias,
+            entry_bias=entry_bias,
+            conflicts=conflicts,
+            technical_context=technical_context,
+            levels_context=levels_context,
+            reasons=reasons + stop_plan.reasons,
+            warnings=warnings,
+        )
+
     return TradePlan(
         symbol=symbol,
         scenario_name=scenario.name,

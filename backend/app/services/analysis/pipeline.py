@@ -126,15 +126,17 @@ def _select_scenario(
     scenario_analysis: ScenarioAnalysis,
     bias: MarketBias,
 ) -> Scenario:
-    """Choose the strongest evidence-backed candidate, not just overall bias.
+    """Choose the strongest evidence-backed scalp candidate for the dashboard.
 
-    Confluence/conviction and actual trigger state lead. HTF alignment is a
-    tie-breaker/penalty, so a valid counter-trend scalp can still win when its
-    evidence is materially stronger, without hiding the conflict from the AI.
+    Intraday candidates remain available to AI Chat. Dashboard selection is
+    restricted to scalp scenarios and then ranked by evidence, confirmation,
+    proximity, and higher-timeframe alignment.
     """
-    scenarios = scenario_analysis.scenarios
+    # The dashboard's primary decision is scalping. Intraday scenarios remain
+    # available in the full context for AI Chat, but must not win dashboard selection.
+    scenarios = scenario_analysis.scalp_scenarios
     if not scenarios:
-        raise ValueError("Cannot select a scenario from an empty candidate set")
+        raise ValueError("Cannot select a dashboard scalp scenario from an empty candidate set")
 
     conviction_rank = {"high": 3, "medium": 2, "low": 1}
     invalid_status = {"invalidated", "rejected"}
