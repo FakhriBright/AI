@@ -20,8 +20,7 @@ class TimeframeContext:
     atr14: float | None
     reasons: list[str] = field(default_factory=list)
     swings: list = field(default_factory=list)
-    # Deliberately NOT named `candles`: scenario.py/breakout_classifier read
-    # getattr(tf, "candles", []) and would change scenario behaviour.
+    # Closed-candle evidence shared by scenario, level, and AI analysis.
     evidence_candles: list = field(default_factory=list)
     patterns: list = field(default_factory=list)
 
