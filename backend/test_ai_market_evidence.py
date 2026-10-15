@@ -31,12 +31,12 @@ def test_fvg_and_order_block_are_detected_from_closed_candles():
 
 def test_scenario_selection_uses_evidence_not_overall_bias_alone():
     weak_bull = Scenario(
-        name="bullish_reversal", direction="bullish", status="conditional",
+        name="scalp_bullish_reversal", direction="bullish", status="conditional",
         trigger="support", invalidation="break support", conviction="low",
         confluence_score=20, trigger_reference=100, trigger_distance_atr=0.8,
     )
     strong_bear = Scenario(
-        name="bearish_continuation", direction="bearish", status="conditional",
+        name="scalp_bearish_continuation", direction="bearish", status="conditional",
         trigger="support break", invalidation="resistance", conviction="high",
         confluence_score=75, trigger_reference=95, trigger_distance_atr=0.4,
     )
@@ -46,10 +46,26 @@ def test_scenario_selection_uses_evidence_not_overall_bias_alone():
         intraday=SimpleNamespace(direction="mixed"),
     )
     selected = _select_scenario(
-        ScenarioAnalysis("XAUUSDm", 98, [weak_bull, strong_bear], []),
+        ScenarioAnalysis("XAUUSDm", 98, [], [weak_bull, strong_bear]),
         bias,
     )
-    assert selected.name == "bearish_continuation"
+    assert selected.name == "scalp_bearish_continuation"
+
+
+def test_scenario_selection_returns_wait_when_no_scalp_candidates_exist():
+    bias = SimpleNamespace(
+        overall="mixed",
+        htf=SimpleNamespace(direction="mixed"),
+        intraday=SimpleNamespace(direction="mixed"),
+    )
+    selected = _select_scenario(
+        ScenarioAnalysis("XAUUSDm", 4100, [], []),
+        bias,
+    )
+    assert selected.name == "scalp_wait_for_directional_bias"
+    assert selected.direction == "mixed"
+    assert selected.trigger_confirmed is False
+    assert "no_scalp_candidate" in selected.rationale
 
 
 def test_fingerprint_ignores_only_narrative_only_trade_plan_fields():

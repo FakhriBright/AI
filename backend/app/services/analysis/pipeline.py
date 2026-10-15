@@ -136,7 +136,21 @@ def _select_scenario(
     # available in the full context for AI Chat, but must not win dashboard selection.
     scenarios = scenario_analysis.scalp_scenarios
     if not scenarios:
-        raise ValueError("Cannot select a dashboard scalp scenario from an empty candidate set")
+        # A mixed/neutral entry bias is a valid market state, not a backend error.
+        # Keep the dashboard and AI Chat available, but explicitly represent WAIT
+        # instead of silently substituting an intraday setup into the scalp slot.
+        return Scenario(
+            name="scalp_wait_for_directional_bias",
+            direction="mixed",
+            status="conditional",
+            trigger="wait_for_clear_directional_bias_and_confirmed_setup",
+            invalidation="reassess_when_entry_bias_becomes_directional",
+            breakout_status="awaiting",
+            conviction="low",
+            confluence_score=0,
+            trigger_confirmed=False,
+            rationale=["no_scalp_candidate", "entry_bias_not_directional", "wait_for_confirmation"],
+        )
 
     conviction_rank = {"high": 3, "medium": 2, "low": 1}
     invalid_status = {"invalidated", "rejected"}
