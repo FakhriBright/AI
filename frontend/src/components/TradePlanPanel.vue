@@ -44,7 +44,7 @@ const statusExplanation = computed(() => {
   if (plan.value.status === 'confirmed_needs_stop') return `${action.value} is the preferred direction, but a valid stop loss is missing. Do not enter yet.`
   if (plan.value.status === 'confirmed_needs_target') return `${action.value} is the preferred direction, but a valid take-profit and risk/reward calculation are missing. Do not enter yet.`
   return `${action.value} is the preferred direction, not an active entry. Wait for the required candle confirmation.`
-}
+})
 
 const bias = computed(() => plan.value.direction || plan.value.market_bias || 'Neutral')
 
