@@ -808,6 +808,58 @@ select option {
   border-left: 4px solid var(--accent-primary);
 }
 
+.trade-decision {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  border: 1px solid var(--color-neutral-border);
+  border-radius: var(--radius-md);
+  background: var(--color-neutral-bg);
+}
+
+.trade-decision.decision-buy {
+  border-color: var(--color-bullish-border);
+  background: var(--color-bullish-bg);
+}
+
+.trade-decision.decision-sell {
+  border-color: var(--color-bearish-border);
+  background: var(--color-bearish-bg);
+}
+
+.trade-decision.decision-wait {
+  border-color: var(--color-warning-border);
+  background: var(--color-warning-bg);
+}
+
+.decision-action {
+  min-width: 82px;
+  text-align: center;
+  font-size: 21px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: var(--color-neutral);
+}
+
+.decision-buy .decision-action { color: var(--color-bullish); }
+.decision-sell .decision-action { color: var(--color-bearish); }
+.decision-wait .decision-action { color: var(--color-warning); }
+
+.decision-copy strong {
+  display: block;
+  color: var(--text-main);
+  font-size: 13px;
+}
+
+.decision-copy p {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .trade-plan-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);

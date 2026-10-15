@@ -19,6 +19,34 @@ const props = defineProps({
 
 const plan = computed(() => props.tradePlan || {})
 
+const action = computed(() => ['BUY', 'SELL'].includes(plan.value.action) ? plan.value.action : 'WAIT')
+
+const decisionTitle = computed(() => {
+  if (action.value === 'BUY') return 'BUY — rencana beli terkonfirmasi'
+  if (action.value === 'SELL') return 'SELL — rencana jual terkonfirmasi'
+  return 'WAIT — jangan entry dulu'
+})
+
+const decisionReason = computed(() => {
+  const current = plan.value
+  if (action.value !== 'WAIT') {
+    return 'Syarat setup, stop loss, target, dan rasio risiko/hasil lolos pemeriksaan engine. Tetap tinjau manual sebelum membuka posisi.'
+  }
+  if (current.status === 'confirmed_needs_risk') {
+    return 'Arah setup sudah terkonfirmasi, tetapi pengaturan risiko atau perhitungan ukuran posisi belum lengkap.'
+  }
+  if (current.status === 'confirmed_needs_stop') {
+    return 'Sinyal sudah terkonfirmasi, tetapi stop loss yang valid belum tersedia. Jangan entry dulu.'
+  }
+  if (current.status === 'rejected_rr') {
+    return 'Target yang valid belum memberi rasio risiko/hasil minimal 1:1. Tunggu setup yang lebih layak.'
+  }
+  if (current.status === 'waiting') {
+    return current.reasons?.[0] || 'Candle konfirmasi belum memenuhi aturan entry.'
+  }
+  return current.warnings?.[0] || 'Belum semua syarat entry lolos pemeriksaan engine.'
+})
+
 const status = computed(() => {
   if (!plan.value.status) return 'WAITING FOR CONFIRMATION'
   return plan.value.status.replace(/_/g, ' ').toUpperCase()
@@ -82,6 +110,14 @@ const invalidation = computed(() => {
     </div>
 
     <div class="card-body">
+      <section class="trade-decision" :class="'decision-' + action.toLowerCase()" aria-live="polite">
+        <div class="decision-action">{{ action }}</div>
+        <div class="decision-copy">
+          <strong>{{ decisionTitle }}</strong>
+          <p>{{ decisionReason }}</p>
+        </div>
+      </section>
+
       <!-- 4 Core Metric Grid -->
       <div class="trade-plan-grid">
         <div class="metric-card">
