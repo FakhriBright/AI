@@ -26,6 +26,10 @@ def get_ai_provider() -> AIProvider:
         from app.services.ai.groq_provider import GroqAIProvider
         return GroqAIProvider()
 
+    if settings.ai_provider == "ollama":
+        from app.services.ai.ollama_provider import OllamaAIProvider
+        return OllamaAIProvider()
+
     if settings.ai_provider == "mock":
         # Explicit opt-in only (AI_PROVIDER=mock), for local development and
         # automated tests without a live Gemini API key. Never selected as a
@@ -34,6 +38,6 @@ def get_ai_provider() -> AIProvider:
 
     raise ValueError(
         f"Unknown AI_PROVIDER: {settings.ai_provider!r}. "
-        "Supported values in this build: 'gemini', 'groq', 'mock'."
+        "Supported values in this build: 'gemini', 'groq', 'ollama', 'mock'."
     )
 

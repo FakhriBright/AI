@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-120b"
 
+    # Ollama provider (used when ai_provider="ollama")
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "qwen3:1.7b"
+    ollama_num_ctx: int = 16384
+    ollama_timeout_seconds: float = 300.0
+
     # Auth
     jwt_secret: str
     jwt_algorithm: str = "HS256"
