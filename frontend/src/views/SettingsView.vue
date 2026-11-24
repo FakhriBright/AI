@@ -9,6 +9,7 @@ import {
   getStoredUserEmail,
   getStoredToken,
 } from '../services/api'
+import AIProviderSettings from '../components/AIProviderSettings.vue'
 
 const emit = defineEmits(['logout'])
 
@@ -145,7 +146,10 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- SECTION 2: ADVANCED DIAGNOSTICS (VISUALLY SECONDARY) -->
+    <!-- SECTION 2: AI PROVIDER & MODEL -->
+    <AIProviderSettings />
+
+    <!-- SECTION 3: ADVANCED DIAGNOSTICS (VISUALLY SECONDARY) -->
     <details class="details-accordion">
       <summary>Advanced Diagnostics & Health</summary>
       <div class="card-body">

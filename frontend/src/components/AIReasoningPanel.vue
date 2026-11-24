@@ -14,6 +14,7 @@ const props = defineProps({
 
 const provider = computed(() => props.aiData?.provider || 'gemini')
 const model = computed(() => props.aiData?.model || 'gemini-3.6-flash')
+const routing = computed(() => props.aiData?.raw?.provider_routing || null)
 const rawAnalysis = computed(() => props.aiData?.analysis || '')
 
 const paragraphs = computed(() => {
@@ -38,8 +39,13 @@ function formatParagraph(text) {
     <!-- AI Header -->
     <div class="state-header flex justify-between items-center">
       <h2 class="section-title">AI ANALYSIS</h2>
-      <span class="text-muted text-xs font-mono" title="Provider Info">
-        {{ provider.toUpperCase() }}
+      <span
+        class="text-muted text-xs font-mono"
+        :title="routing?.fallback_used
+          ? `${provider} · ${model} (fallback from ${routing.requested_provider} · ${routing.requested_model})`
+          : `${provider} · ${model}`"
+      >
+        {{ provider.toUpperCase() }}<span v-if="routing?.fallback_used" class="text-amber"> · FALLBACK</span>
       </span>
     </div>
 

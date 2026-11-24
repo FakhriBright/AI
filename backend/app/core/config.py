@@ -23,15 +23,38 @@ class Settings(BaseSettings):
     ai_provider: str = "gemini"
     ai_api_key: str = ""
 
+    # Shared request timeout for the hosted providers (Groq, Gemini, OpenRouter).
+    ai_request_timeout_seconds: float = 90.0
+
+    # Reasoning models (Gemini 3.x, gpt-oss, many OpenRouter models) count their
+    # hidden thinking against the output-token limit. This allowance is added on
+    # top of the max_tokens requested by AIReasoningService so thinking cannot
+    # consume the whole budget and leave the visible answer empty or truncated.
+    ai_reasoning_tokens: int = 6144
+
+    # Multi-provider selector. Users without saved AI settings keep using
+    # ai_provider above. The *_models values are optional comma-separated
+    # allowlists that narrow (never extend) the models discovered per key.
+    ai_fallback_order: str = "groq,gemini,openrouter"
+    ai_fallback_max_attempts: int = 3
+    ai_provider_cooldown_seconds: int = 60
+    ai_model_cache_seconds: int = 600
+
     # Groq provider (used when ai_provider="groq")
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-120b"
+    groq_models: str = ""
 
-    # Ollama provider (used when ai_provider="ollama")
-    ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "qwen3:1.7b"
-    ollama_num_ctx: int = 16384
-    ollama_timeout_seconds: float = 300.0
+    # Gemini provider. GEMINI_API_KEY is preferred; AI_API_KEY is the legacy name.
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.6-flash"
+    gemini_models: str = ""
+
+    # OpenRouter provider (OpenAI-compatible API)
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_model: str = ""
+    openrouter_models: str = ""
 
     # Auth
     jwt_secret: str

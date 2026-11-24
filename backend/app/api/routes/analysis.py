@@ -11,7 +11,7 @@ from app.db.session import get_db
 from app.models.user import User
 from app.schemas.analysis import AnalysisResponse, AnalysisChatRequest, AnalysisChatResponse
 from app.services.ai.chat_context import select_chat_context
-from app.services.ai.factory import get_ai_provider
+from app.services.ai.factory import get_ai_provider_for_user
 from app.services.ai.metrics import metrics_collector
 from app.services.ai.reasoning import AIReasoningService
 from app.services.analysis.pipeline import (
@@ -116,7 +116,7 @@ async def analyze_market(
 
     try:
         try:
-            ai_service = AIReasoningService(provider=get_ai_provider())
+            ai_service = AIReasoningService(provider=get_ai_provider_for_user(db, current_user))
         except Exception:
             logger.exception("AI provider initialization failed; serving deterministic analysis")
             ai_service = None
@@ -184,7 +184,7 @@ async def chat_analysis(
     capped_message = payload.message.strip()[:500]
 
     try:
-        ai_service = AIReasoningService(provider=get_ai_provider())
+        ai_service = AIReasoningService(provider=get_ai_provider_for_user(db, current_user))
     except Exception as exc:
         logger.exception("Error initializing AI service for chat")
         raise HTTPException(status_code=502, detail="AI analysis temporarily unavailable") from exc

@@ -6,7 +6,7 @@ from sqlalchemy import engine_from_config, pool
 # Import Base + all models so autogenerate can see them.
 from app.core.config import settings
 from app.db.base import Base
-from app.models import analysis, instrument, risk_settings, strategy_profile, user  # noqa: F401
+from app.models import ai_provider_settings, analysis, instrument, risk_settings, strategy_profile, user  # noqa: F401
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)

@@ -8,7 +8,7 @@ from app.services.ai.base import AIResponse
 
 class GroqAIProvider:
 
-    def __init__(self):
+    def __init__(self, model: str | None = None):
         if not settings.groq_api_key:
             raise RuntimeError(
                 "GROQ_API_KEY is not configured. "
@@ -17,10 +17,11 @@ class GroqAIProvider:
 
         self.client = AsyncGroq(
             api_key=settings.groq_api_key,
+            timeout=settings.ai_request_timeout_seconds,
         )
 
         self.provider = "groq"
-        self.model = settings.groq_model
+        self.model = model or settings.groq_model
 
     async def analyze(
         self,
@@ -44,7 +45,7 @@ class GroqAIProvider:
 
         max_tokens = context.get("max_tokens")
         if isinstance(max_tokens, int) and max_tokens > 0:
-            create_kwargs["max_tokens"] = max_tokens
+            create_kwargs["max_tokens"] = max_tokens + max(0, settings.ai_reasoning_tokens)
 
         response = await self.client.chat.completions.create(
             **create_kwargs,

@@ -3,7 +3,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routes import analysis, auth, health, market
+from app.api.routes import ai_settings, analysis, auth, health, market
 from app.core.config import settings
 
 logger = logging.getLogger("app_error")
@@ -40,3 +40,4 @@ app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(market.router)
 app.include_router(analysis.router)
+app.include_router(ai_settings.router)

@@ -9,16 +9,20 @@ from app.services.ai.base import AIResponse
 
 class GeminiAIProvider:
 
-    def __init__(self):
-        if not settings.ai_api_key:
-            raise RuntimeError("AI_API_KEY is not configured")
+    def __init__(self, model: str | None = None):
+        api_key = settings.gemini_api_key or settings.ai_api_key
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY (or legacy AI_API_KEY) is not configured")
 
         self.client = genai.Client(
-            api_key=settings.ai_api_key
+            api_key=api_key,
+            http_options=types.HttpOptions(
+                timeout=int(settings.ai_request_timeout_seconds * 1000),
+            ),
         )
 
         self.provider = "gemini"
-        self.model = "gemini-3.6-flash"
+        self.model = model or settings.gemini_model
 
     async def analyze(
         self,
@@ -39,7 +43,7 @@ class GeminiAIProvider:
         max_tokens = context.get("max_tokens")
         if isinstance(max_tokens, int) and max_tokens > 0:
             generate_kwargs["config"] = types.GenerateContentConfig(
-                max_output_tokens=max_tokens,
+                max_output_tokens=max_tokens + max(0, settings.ai_reasoning_tokens),
             )
 
         response = await self.client.aio.models.generate_content(
@@ -47,6 +51,11 @@ class GeminiAIProvider:
         )
 
         analysis = response.text or ""
+
+        finish_reason = None
+        if response.candidates:
+            reason = response.candidates[0].finish_reason
+            finish_reason = getattr(reason, "value", reason)
 
         usage = {"type": "ESTIMATED", "prompt_tokens": len(prompt) // 4, "completion_tokens": len(analysis) // 4, "total_tokens": (len(prompt) + len(analysis)) // 4}
         if hasattr(response, "usage_metadata") and response.usage_metadata:
@@ -68,6 +77,8 @@ class GeminiAIProvider:
             analysis=analysis,
             raw={
                 "model": self.model,
+                "model_version": getattr(response, "model_version", None),
+                "finish_reason": finish_reason,
                 "usage": usage,
             },
         )

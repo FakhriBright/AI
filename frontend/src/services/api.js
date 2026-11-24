@@ -154,6 +154,36 @@ export async function getMarketHealth() {
 }
 
 /**
+ * AI Provider Settings (per user, stored in the backend database)
+ *
+ * API keys never leave the server: these endpoints only report whether a
+ * provider has a key configured.
+ */
+export async function getAISettings() {
+  return await request('/ai/settings')
+}
+
+export async function saveAISettings(settings) {
+  return await request('/ai/settings', {
+    method: 'PUT',
+    body: JSON.stringify(settings),
+  })
+}
+
+export async function getAIProviderModels(provider, refresh = false) {
+  return await request(
+    `/ai/providers/${encodeURIComponent(provider)}/models${refresh ? '?refresh=true' : ''}`
+  )
+}
+
+export async function testAIConnection(provider, model) {
+  return await request('/ai/test', {
+    method: 'POST',
+    body: JSON.stringify({ provider, model }),
+  })
+}
+
+/**
  * Conversational AI Assistant
  *
  * No client-side fallback: if the backend chat endpoint fails, the error is
