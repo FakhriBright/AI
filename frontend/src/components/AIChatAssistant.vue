@@ -2,6 +2,7 @@
 import { ref, computed, watch, nextTick } from 'vue'
 import { sendAnalysisChat } from '../services/api'
 import { getBiasBadgeClass } from '../utils/formatters'
+import { applyChartCommand } from '../utils/chartOverlays'
 
 const props = defineProps({
   symbol: {
@@ -89,6 +90,7 @@ async function handleSendMessage(textToSend) {
     messages.value.push({
       role: 'assistant',
       content: res.reply || 'No response generated.',
+      chartNote: chartNote(applyChartCommand(res.chart, props.symbol)),
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     })
   } catch (err) {
@@ -105,6 +107,16 @@ async function handleSendMessage(textToSend) {
     isLoading.value = false
     scrollToBottom()
   }
+}
+
+function chartNote(summary) {
+  if (!summary) return ''
+  const parts = []
+  if (summary.cleared) parts.push('AI drawings cleared')
+  if (summary.created.length) parts.push(`drawn: ${summary.created.join(', ')}`)
+  if (summary.highlighted) parts.push(`${summary.highlighted} object(s) highlighted`)
+  parts.push(...(summary.notes || []))
+  return parts.length ? `Chart · ${parts.join(' · ')}` : ''
 }
 
 function renderMarkdown(text) {
@@ -160,6 +172,7 @@ function renderMarkdown(text) {
         >
           <!-- eslint-disable-next-line vue/no-v-html -->
           <div style="overflow-wrap: anywhere" v-html="renderMarkdown(msg.content)"></div>
+          <div v-if="msg.chartNote" class="text-xs text-accent" style="margin-top: 6px;">{{ msg.chartNote }}</div>
         </div>
 
         <div v-if="isLoading" class="chat-bubble assistant text-muted text-xs">

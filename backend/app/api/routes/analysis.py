@@ -20,6 +20,8 @@ from app.services.analysis.pipeline import (
     get_deterministic_context,
 )
 from app.services.analysis.errors import market_data_error_detail
+from app.services.chart.chat_commands import build_chat_chart_command
+from app.services.chart.overlays import build_chart_overlays
 from app.services.market_data.factory import get_market_data_provider
 from app.services.market_data.base import MarketDataProvider
 
@@ -56,6 +58,15 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+def _chart_overlays(ai_context: dict[str, Any] | None) -> dict[str, Any] | None:
+    # Drawing must never break the analysis response.
+    try:
+        return build_chart_overlays(ai_context) if ai_context else None
+    except Exception:
+        logger.exception("Chart overlay build failed")
+        return None
+
+
 def _build_response(
     result: AnalysisPipelineResult,
 ) -> AnalysisResponse:
@@ -85,6 +96,7 @@ def _build_response(
             "analysis": result.ai_response.analysis,
             "raw": _json_safe(result.ai_response.raw),
         },
+        chart_overlays=_chart_overlays(_json_safe(result.ai_context)),
     )
 
 
@@ -256,9 +268,21 @@ async def chat_analysis(
             detail="AI analysis temporarily unavailable.",
         ) from exc
 
+    chart = None
+    try:
+        full_context = _json_safe(det.ai_context)
+        overlays = build_chart_overlays(full_context)
+        chart = {
+            **build_chat_chart_command(capped_message, ai_response.analysis, overlays, full_context),
+            "overlay_payload": overlays,
+        }
+    except Exception:
+        logger.exception("Chat chart command build failed")
+
     return AnalysisChatResponse(
         symbol=target_symbol,
         reply=ai_response.analysis,
         provider=ai_response.provider,
         model=ai_response.model,
+        chart=chart,
     )

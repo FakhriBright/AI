@@ -28,6 +28,10 @@ class AnalysisResponse(BaseModel):
 
     ai: AIAnalysisResponse
 
+    # Deterministic chart overlays (see services/chart/overlays.py). Additive:
+    # older frontends ignore it.
+    chart_overlays: dict[str, Any] | None = None
+
 
 class ChatMessage(BaseModel):
     role: str  # "user", "assistant", or "system"
@@ -46,4 +50,6 @@ class AnalysisChatResponse(BaseModel):
     reply: str
     provider: str
     model: str
+    # Chart commands derived from this exchange without another LLM call.
+    chart: dict[str, Any] | None = None
 

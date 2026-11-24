@@ -47,6 +47,8 @@ const emit = defineEmits(['retry'])
       :symbol="symbol"
       :key-levels="analysisData?.key_levels"
       :selected-scenario="analysisData?.selected_scenario"
+      :overlay-payload="analysisData?.chart_overlays"
+      :generated-at="analysisData?.generated_at_utc"
     />
 
     <!-- Single Coherent Trade Plan Module -->
