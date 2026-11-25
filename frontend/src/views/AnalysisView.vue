@@ -56,6 +56,9 @@ const emit = defineEmits(['retry'])
       :trade-plan="analysisData?.trade_plan"
       :stop-plan="analysisData?.stop_plan"
       :symbol="symbol"
+      :market-bias="analysisData?.market_bias"
+      :selected-scenario="analysisData?.selected_scenario"
+      :confirmation="analysisData?.confirmation"
     />
 
     <!-- Key Analysis Grid -->

@@ -5,8 +5,8 @@ export function getInitialTheme() {
   if (saved === 'dark' || saved === 'light') {
     return saved
   }
-  // Default to light as per root design system or system preference
-  return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+  // No saved choice: the terminal defaults to the dark navy workspace.
+  return 'dark'
 }
 
 export function applyTheme(theme) {

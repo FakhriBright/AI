@@ -39,8 +39,8 @@ function isActive(itemPath) {
           </slot>
         </div>
         <div class="brand-text">
-          <span class="brand-title">QUANTTERMAL</span>
-          <span class="brand-subtitle">Trading Analysis</span>
+          <span class="brand-title">FR QUANTTERMINAL</span>
+          <span class="brand-subtitle">Intelligent Price Action Workspace</span>
         </div>
       </div>
 
