@@ -13,6 +13,7 @@ import {
   allOverlays,
   applyKeyLevelZones,
   applyOverlayPayload,
+  buildDerived,
   categoryOf,
   chartStore,
   clearAiDrawings,
@@ -23,6 +24,7 @@ import {
   presetPrefs,
   resetForSymbol,
   saveLayerPrefs,
+  sourceOf,
   tfRank,
   toggleHidden,
   visibleOverlays,
@@ -50,7 +52,20 @@ const props = defineProps({
     type: String,
     default: null,
   },
+  marketBias: {
+    type: Object,
+    default: null,
+  },
+  scenarios: {
+    type: Object,
+    default: null,
+  },
 })
+
+// Candles loaded per timeframe; the viewport shows a window of them.
+const CANDLE_COUNT = 300
+const DEFAULT_VISIBLE = 80
+const FUTURE_BARS = 8 // blank space for conditional scenario projections
 
 const OVERLAY_COLORS = {
   bullish: '#10b981',
@@ -84,7 +99,38 @@ const mousePos = ref({ x: -1, y: -1 })
 // Toolbar popovers
 const openPanel = ref(null) // 'layers' | 'objects' | null
 const expanded = ref({})
-const objectFilter = ref({ tf: 'current', status: 'all' })
+const objectFilter = ref({ tf: 'current', status: 'all', source: 'all' })
+
+// Viewport: `size` visible candles; `anchor` = time of the first visible candle
+// once the user pans (null = follow the latest candle). Time-anchored so a data
+// refresh does not shift the view.
+const view = ref({ size: DEFAULT_VISIBLE, anchor: null })
+const drag = { active: false, moved: false, startX: 0, startIndex: 0 }
+let lastGeom = null
+const hoverInfo = ref(null) // { o, x, y }
+const selected = ref(null) // pinned object details
+
+// Display precision from the market data itself (symbol tick size).
+const priceDigits = computed(() => {
+  let digits = 0
+  for (const c of candles.value.slice(-50)) {
+    for (const v of [c.open, c.high, c.low, c.close]) {
+      const text = String(v)
+      const d = text.includes('.') ? text.split('.')[1].length : 0
+      if (d > digits) digits = d
+    }
+  }
+  return Math.min(digits, 6)
+})
+
+function fmtPrice(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return formatPrice(value, props.symbol)
+  return candles.value.length ? value.toFixed(priceDigits.value) : formatPrice(value, props.symbol)
+}
+
+function resetView() {
+  view.value = { size: DEFAULT_VISIBLE, anchor: null }
+}
 const visibleRange = ref(null) // price range of the last render (for Relevant Only)
 
 const isStale = computed(() => {
@@ -169,7 +215,12 @@ const managerGroups = computed(() => {
       if (objectFilter.value.status === 'historical') return HISTORICAL_STATUSES.has(o.status)
       return true
     })
-    .map((o) => ({ o, type: overlayType(o), drawn: drawnIds.has(o.id), hidden: chartStore.hiddenIds.includes(o.id) }))
+    .filter((o) => objectFilter.value.source === 'all' || sourceOf(o) === objectFilter.value.source)
+    .filter((o) => objectFilter.value.visibility !== 'drawn' || drawnIds.has(o.id))
+    .map((o) => ({
+      o, type: overlayType(o), source: sourceOf(o),
+      drawn: drawnIds.has(o.id), hidden: chartStore.hiddenIds.includes(o.id),
+    }))
   return CATEGORIES.map((c) => ({
     ...c,
     rows: rows
@@ -180,10 +231,10 @@ const managerGroups = computed(() => {
 })
 
 function objectPrice(o) {
-  if (o.kind === 'zone') return `${formatPrice(o.price_low, props.symbol)}–${formatPrice(o.price_high, props.symbol)}`
-  if (o.kind === 'position') return `E ${formatPrice(o.entry, props.symbol)}`
-  if (o.points?.length) return o.points.map((p) => formatPrice(p.price, props.symbol)).join(' → ')
-  return formatPrice(o.price, props.symbol)
+  if (o.kind === 'zone') return `${fmtPrice(o.price_low)}–${fmtPrice(o.price_high)}`
+  if (o.kind === 'position') return `E ${fmtPrice(o.entry)}`
+  if (o.points?.length) return o.points.map((p) => fmtPrice(p.price)).join(' → ')
+  return fmtPrice(o.price)
 }
 
 function objectTime(o) {
@@ -203,6 +254,23 @@ function focusObject(o) {
   }
   if (chartStore.hiddenIds.includes(o.id)) toggleHidden(o.id)
   chartStore.highlightIds = [o.id]
+  // Pan so the object's start time is inside the viewport (exact location).
+  const t = o.time_start || o.points?.find((pt) => pt.time)?.time
+  if (t && tf === activeTf.value) bringTimeIntoView(t)
+}
+
+function bringTimeIntoView(iso) {
+  const t = Date.parse(iso)
+  const times = candles.value.map((c) => Date.parse(c.time_utc))
+  if (!Number.isFinite(t) || !times.length) return
+  const size = Math.min(view.value.size, times.length)
+  const latestStart = times.length - size
+  const currentStart = view.value.anchor ? Math.max(0, times.findIndex((x) => x >= Date.parse(view.value.anchor))) : latestStart
+  let idx = times.findIndex((x) => x >= t)
+  if (idx < 0) idx = times.length - 1
+  if (idx >= currentStart && idx < currentStart + size) return
+  const start = Math.max(0, Math.min(latestStart, idx - Math.floor(size / 3)))
+  view.value = { size, anchor: start >= latestStart ? null : candles.value[start].time_utc }
 }
 
 async function fetchCandles() {
@@ -211,7 +279,7 @@ async function fetchCandles() {
   hoveredCandle.value = null
 
   try {
-    const res = await getMarketCandles(props.symbol, activeTf.value, 80)
+    const res = await getMarketCandles(props.symbol, activeTf.value, CANDLE_COUNT)
     if (res?.candles && Array.isArray(res.candles)) {
       candles.value = res.candles
     } else {
@@ -230,6 +298,8 @@ function handleTimeframeChange(tf) {
   if (activeTf.value === tf) return
   activeTf.value = tf
   chartStore.activeTf = tf
+  resetView()
+  selected.value = null
   fetchCandles()
 }
 
@@ -240,6 +310,9 @@ watch(
     resetForSymbol(symbol)
     applyOverlayPayload(props.overlayPayload, symbol)
     applyKeyLevelZones(props.keyLevels, symbol)
+    rebuildDerived()
+    resetView()
+    selected.value = null
     fetchCandles()
   }
 )
@@ -248,8 +321,21 @@ watch(
   () => props.overlayPayload,
   (payload) => {
     applyOverlayPayload(payload, props.symbol)
+    rebuildDerived()
   }
 )
+
+function rebuildDerived() {
+  buildDerived({
+    symbol: props.symbol,
+    marketBias: props.marketBias,
+    scenarios: props.scenarios,
+    currentPrice: props.keyLevels?.current_price,
+  })
+}
+
+watch(() => [props.marketBias, props.scenarios], rebuildDerived)
+watch(view, () => renderChart(), { deep: true })
 
 // A new analysis snapshot means new closed candles: refresh the candles so
 // overlays and candles describe the same data.
@@ -271,7 +357,7 @@ watch(
 
 watch(
   () => [
-    chartStore.engine, chartStore.keyZones, chartStore.annotations,
+    chartStore.engine, chartStore.keyZones, chartStore.derived, chartStore.annotations,
     chartStore.highlightIds, chartStore.hiddenIds, isStale.value,
   ],
   () => {
@@ -312,8 +398,8 @@ function renderChart() {
   ctx.fillStyle = isDark ? '#131b2e' : '#ffffff'
   ctx.fillRect(0, 0, width, height)
 
-  const candleList = candles.value
-  if (!candleList || candleList.length === 0) {
+  const allCandles = candles.value
+  if (!allCandles || allCandles.length === 0) {
     ctx.fillStyle = isDark ? '#94a3b8' : '#64748b'
     ctx.font = '13px sans-serif'
     ctx.textAlign = 'center'
@@ -328,6 +414,21 @@ function renderChart() {
   const padding = { top: 25, bottom: 45, left: 10, right: 65 }
   const chartWidth = width - padding.left - padding.right
   const chartHeight = height - padding.top - padding.bottom
+
+  // Viewport window over the loaded candles (zoom/pan).
+  const allTimes = allCandles.map((c) => Date.parse(c.time_utc))
+  const size = Math.max(15, Math.min(view.value.size, allCandles.length))
+  const latestStart = allCandles.length - size
+  let start = latestStart
+  if (view.value.anchor) {
+    const anchorT = Date.parse(view.value.anchor)
+    const idx = allTimes.findIndex((t) => t >= anchorT)
+    start = Math.max(0, Math.min(latestStart, idx < 0 ? latestStart : idx))
+  }
+  const followingLatest = start === latestStart
+  const candleList = allCandles.slice(start, start + size)
+  // Future space only at the live edge and only when scenarios are drawn.
+  const future = followingLatest && layerPrefs.value.byTf[activeTf.value]?.scenario ? FUTURE_BARS : 0
 
   // Min and Max prices
   let minPrice = Infinity
@@ -378,7 +479,7 @@ function renderChart() {
     ctx.lineTo(width - padding.right, y)
     ctx.stroke()
 
-    ctx.fillText(formatPrice(priceVal, props.symbol), width - padding.right + 8, y + 3)
+    ctx.fillText(fmtPrice(priceVal), width - padding.right + 8, y + 3)
   }
 
   // Draw Key Levels Overlay
@@ -449,10 +550,15 @@ function renderChart() {
 
   // Candlesticks rendering
   const count = candleList.length
-  const candleSpacing = chartWidth / count
-  const candleWidth = Math.max(2, candleSpacing * 0.7)
+  const candleSpacing = chartWidth / (count + future)
+  const candleWidth = Math.max(1.5, candleSpacing * 0.7)
+  const barMs = allTimes.length > 1 ? allTimes[allTimes.length - 1] - allTimes[allTimes.length - 2] : 60000
 
-  const geom = { ctx, width, height, padding, chartWidth, chartHeight, getY, chartMin, chartMax, candleList, candleSpacing, isDark }
+  const geom = {
+    ctx, width, height, padding, chartWidth, chartHeight, getY, chartMin, chartMax, candleList, candleSpacing, isDark,
+    allCandles, allTimes, start, future, barMs, followingLatest, hits: [], labels: [],
+  }
+  lastGeom = geom
   const range = { min: chartMin, max: chartMax }
   if (!visibleRange.value || visibleRange.value.min !== range.min || visibleRange.value.max !== range.max) {
     visibleRange.value = range
@@ -518,7 +624,7 @@ function renderChart() {
       ctx.fillRect(width - padding.right + 2, mousePos.value.y - 8, 60, 16)
       ctx.fillStyle = '#ffffff'
       ctx.font = '10px monospace'
-      ctx.fillText(formatPrice(hoveredPrice, props.symbol), width - padding.right + 5, mousePos.value.y + 4)
+      ctx.fillText(fmtPrice(hoveredPrice), width - padding.right + 5, mousePos.value.y + 4)
     }
 
     ctx.setLineDash([])
@@ -530,12 +636,25 @@ function renderChart() {
 // Rendering only: nothing here changes what the engine detected.
 // ---------------------------------------------------------------------------
 
+// Market time -> canvas x, through the loaded candle series and the viewport.
+// Objects older than the loaded data start just off the left edge; times after
+// the last candle are extrapolated by the bar duration (projection space).
+function indexToX(geom, idx) {
+  return geom.padding.left + (idx - geom.start) * geom.candleSpacing + geom.candleSpacing / 2
+}
+
 function timeToX(geom, iso) {
   const t = Date.parse(iso || '')
-  const { times, padding, candleSpacing } = geom
-  if (!Number.isFinite(t) || !times.length) return null
-  if (t < times[0]) return padding.left // older than the visible window: clamp to the left edge
-  return padding.left + timeIndex(times, t) * candleSpacing + candleSpacing / 2
+  const { allTimes } = geom
+  if (!Number.isFinite(t) || !allTimes.length) return null
+  if (t < allTimes[0]) return indexToX(geom, -1)
+  const last = allTimes.length - 1
+  if (t > allTimes[last]) return indexToX(geom, last + (t - allTimes[last]) / geom.barMs)
+  return indexToX(geom, timeIndex(allTimes, t))
+}
+
+function xToIndex(geom, x) {
+  return Math.round((x - geom.padding.left - geom.candleSpacing / 2) / geom.candleSpacing) + geom.start
 }
 
 function timeIndex(times, t) {
@@ -602,13 +721,11 @@ function drawArrowHead(ctx, x, fromY, toY) {
 function zoneEndX(geom, o, type) {
   if (!FADED_STATUSES.has(o.status) || !['fvg', 'ob', 'supply', 'demand'].includes(type)) return null
   const t = Date.parse(o.time_start || '')
-  if (!Number.isFinite(t)) return null
-  const start = timeIndex(geom.times, t) + (type === 'fvg' ? 3 : 2)
-  for (let i = start; i < geom.candleList.length; i += 1) {
-    const c = geom.candleList[i]
-    if (c.low <= o.price_high && c.high >= o.price_low) {
-      return geom.padding.left + i * geom.candleSpacing + geom.candleSpacing / 2
-    }
+  if (!Number.isFinite(t) || t < geom.allTimes[0]) return null
+  const from = timeIndex(geom.allTimes, t) + (type === 'fvg' ? 3 : 2)
+  for (let i = from; i < geom.allCandles.length; i += 1) {
+    const c = geom.allCandles[i]
+    if (c.low <= o.price_high && c.high >= o.price_low) return indexToX(geom, i)
   }
   return null
 }
@@ -620,7 +737,7 @@ function drawOverlay(geom, item, highlighted) {
   const color = OVERLAY_COLORS[o.color] || OVERLAY_COLORS.neutral
   const minimal = layerPrefs.value.labels === 'minimal'
   const label = `${htf ? `[${o.timeframe}] ` : ''}${o.name}`
-  const fmt = (p) => formatPrice(p, props.symbol)
+  const fmt = (p) => fmtPrice(p)
   const priority = highlighted || o.layer === 'trade_plan' ? 2 : 1
 
   switch (o.kind) {
@@ -705,6 +822,24 @@ function drawOverlay(geom, item, highlighted) {
     }
     case 'arrow': {
       const [a, b] = o.points
+      if (a.time && b.time) {
+        // Relationship arrow between two real chart coordinates.
+        const ax = timeToX(geom, a.time)
+        const bx = timeToX(geom, b.time)
+        if (ax === null || bx === null) break
+        const ay = getY(a.price)
+        const by = getY(b.price)
+        ctx.setLineDash([3, 3])
+        ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke()
+        ctx.setLineDash([])
+        const ang = Math.atan2(by - ay, bx - ax)
+        ctx.beginPath()
+        ctx.moveTo(bx, by)
+        ctx.lineTo(bx - 7 * Math.cos(ang - 0.4), by - 7 * Math.sin(ang - 0.4))
+        ctx.lineTo(bx - 7 * Math.cos(ang + 0.4), by - 7 * Math.sin(ang + 0.4))
+        ctx.closePath(); ctx.fill()
+        break
+      }
       const x = timeToX(geom, a.time) ?? right - 40
       const y1 = getY(a.price)
       const y2 = getY(b.price)
@@ -716,6 +851,71 @@ function drawOverlay(geom, item, highlighted) {
       ctx.setLineDash([])
       drawArrowHead(ctx, x, y1, y2)
       placeLabel(geom, label, x - 8, y2 + (y2 < y1 ? -10 : 10), { color, tag: true, priority: 2 })
+      break
+    }
+    case 'callout': {
+      // Compact note box with a leader line to its anchor (actual time/price).
+      const ax = timeToX(geom, o.time_start) ?? right - 4
+      const ay = getY(o.price)
+      ctx.font = 'bold 9px sans-serif'
+      const text = `${htf ? `[${o.timeframe}] ` : ''}${o.name}`
+      const w = ctx.measureText(text).width + 10
+      const h = 15
+      const spots = [[-w - 14, -22], [14, -22], [-w - 14, 10], [14, 10], [-w / 2, -34], [-w / 2, 22]]
+      let box = null
+      for (const [dx, dy] of spots) {
+        const l = Math.max(padding.left + 2, Math.min(right - w - 2, ax + dx))
+        const t = ay + dy
+        const r = { l, r: l + w, t, b: t + h }
+        if (!geom.labels.some((q) => r.l < q.r && r.r > q.l && r.t < q.b && r.b > q.t)) { box = r; break }
+      }
+      if (!box) break // density limit: never stack callouts on top of each other
+      geom.labels.push(box)
+      ctx.beginPath()
+      ctx.moveTo(ax, ay)
+      ctx.lineTo(box.l + w / 2, box.t + (box.t > ay ? 0 : h))
+      ctx.globalAlpha *= 0.7
+      ctx.stroke()
+      ctx.globalAlpha /= 0.7
+      ctx.beginPath(); ctx.arc(ax, ay, 2.5, 0, Math.PI * 2); ctx.fill()
+      ctx.save()
+      ctx.shadowBlur = 0
+      ctx.fillStyle = geom.isDark ? 'rgba(15, 23, 42, 0.92)' : 'rgba(255, 255, 255, 0.95)'
+      ctx.fillRect(box.l, box.t, w, h)
+      ctx.strokeStyle = color
+      ctx.setLineDash([])
+      ctx.strokeRect(box.l, box.t, w, h)
+      ctx.fillStyle = color
+      ctx.textAlign = 'left'
+      ctx.fillText(text, box.l + 5, box.t + 11)
+      ctx.restore()
+      item.box = box
+      break
+    }
+    case 'scenario': {
+      // Conditional projection in the future space after the last candle only.
+      if (!geom.future) break
+      const lastIdx = geom.allCandles.length - 1
+      const x0 = indexToX(geom, lastIdx)
+      const x1 = indexToX(geom, lastIdx + geom.future - 2)
+      const [a, b] = o.points
+      const y0 = getY(a.price)
+      const y1 = getY(b.price)
+      ctx.setLineDash([2, 4])
+      ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke()
+      ctx.beginPath(); ctx.arc(x1, y1, 3, 0, Math.PI * 2); ctx.stroke()
+      const inval = o.meta?.invalidation_price
+      if (typeof inval === 'number') {
+        const yi = getY(inval)
+        ctx.setLineDash([1, 3])
+        ctx.beginPath(); ctx.moveTo(x0, yi); ctx.lineTo(right, yi); ctx.stroke()
+        placeLabel(geom, `inval ${fmt(inval)}`, right - 4, yi - 3, { color, priority: 1 })
+      }
+      ctx.setLineDash([])
+      placeLabel(geom, `${o.name} · trigger ${fmt(b.price)}`, x1, y1 + (y1 < y0 ? -8 : 14), {
+        align: 'right', color, priority: 1,
+      })
+      item.seg = [x0, y0, x1, y1]
       break
     }
     case 'marker': {
@@ -804,12 +1004,12 @@ function overlayPrices(o) {
 // Draw order inside a pass: background zones first, HTF before current TF,
 // highlighted last so they stay on top.
 function drawPriority(item, highlightedIds) {
-  return (highlightedIds.has(item.overlay.id) ? 10 : 0) + (item.htf ? 0 : 5) + (item.overlay.layer === 'premium_discount' ? -3 : 0)
+  return (highlightedIds.has(item.overlay.id) ? 10 : 0) + (item.htf ? 0 : 5)
+    + (item.overlay.layer === 'premium_discount' ? -3 : 0) + (item.overlay.kind === 'callout' ? 8 : 0)
 }
 
 function drawOverlays(geom, items, phase) {
-  const { ctx, width, height, padding, chartMin, chartMax, candleList } = geom
-  geom.times = geom.times || candleList.map((c) => Date.parse(c.time_utc))
+  const { ctx, width, height, padding, chartMin, chartMax } = geom
   geom.labels = geom.labels || []
   const highlightedIds = new Set(chartStore.highlightIds)
   const top = padding.top
@@ -849,6 +1049,7 @@ function drawOverlays(geom, items, phase) {
       ctx.shadowBlur = 8
     }
     drawOverlay(geom, item, highlighted)
+    registerHit(geom, item)
     ctx.restore()
   }
   ctx.restore()
@@ -862,7 +1063,7 @@ function drawOverlays(geom, items, phase) {
       ctx.globalAlpha = isStale.value ? 0.5 : 1
       placeLabel(
         geom,
-        `${above ? '▲' : '▼'} ${o.name} ${formatPrice(overlayPrices(o)[0], props.symbol)}`,
+        `${above ? '▲' : '▼'} ${o.name} ${fmtPrice(overlayPrices(o)[0])}`,
         width - padding.right - 4,
         above ? top + 8 : bottom - 8,
         { color: OVERLAY_COLORS[o.color] || OVERLAY_COLORS.neutral, tag: true, priority: 2 }
@@ -872,34 +1073,149 @@ function drawOverlays(geom, items, phase) {
   }
 }
 
+// Hit areas recorded while drawing (canvas has no DOM per object).
+function registerHit(geom, item) {
+  const o = item.overlay
+  const { getY, padding, width } = geom
+  const right = width - padding.right
+  const add = (shape) => geom.hits.push({ o, ...shape })
+  switch (o.kind) {
+    case 'zone': {
+      const x1 = timeToX(geom, o.time_start) ?? padding.left
+      add({ type: 'rect', l: x1, r: right, t: getY(o.price_high), b: getY(o.price_low) })
+      break
+    }
+    case 'hline':
+      add({ type: 'seg', x1: timeToX(geom, o.time_start) ?? padding.left, y1: getY(o.price), x2: timeToX(geom, o.time_end) ?? right, y2: getY(o.price) })
+      break
+    case 'trendline':
+    case 'arrow': {
+      const [a, b] = o.points
+      const x1 = timeToX(geom, a.time)
+      const x2 = timeToX(geom, b.time)
+      if (x1 !== null && x2 !== null) add({ type: 'seg', x1, y1: getY(a.price), x2, y2: getY(b.price) })
+      break
+    }
+    case 'scenario':
+      if (item.seg) add({ type: 'seg', x1: item.seg[0], y1: item.seg[1], x2: item.seg[2], y2: item.seg[3] })
+      break
+    case 'callout':
+      if (item.box) add({ type: 'rect', l: item.box.l, r: item.box.r, t: item.box.t, b: item.box.b, priority: 3 })
+      break
+    case 'marker': {
+      const x = timeToX(geom, o.time_start)
+      if (x !== null) add({ type: 'pt', x, y: getY(o.price), priority: 2 })
+      break
+    }
+    case 'label':
+    case 'position':
+      add({ type: 'seg', x1: right - 160, y1: getY(o.price ?? o.entry), x2: right, y2: getY(o.price ?? o.entry), priority: 2 })
+      break
+    default:
+      break
+  }
+}
+
+function hitTest(x, y) {
+  if (!lastGeom) return null
+  let best = null
+  for (const h of lastGeom.hits) {
+    let d = Infinity
+    if (h.type === 'rect') {
+      const t = Math.min(h.t, h.b)
+      const b = Math.max(h.t, h.b)
+      d = x >= h.l && x <= h.r && y >= t - 2 && y <= b + 2 ? 0.5 : Infinity
+    } else if (h.type === 'pt') {
+      d = Math.hypot(x - h.x, y - h.y) <= 8 ? Math.hypot(x - h.x, y - h.y) / 8 : Infinity
+    } else {
+      const dx = h.x2 - h.x1
+      const dy = h.y2 - h.y1
+      const len2 = dx * dx + dy * dy || 1
+      const u = Math.max(0, Math.min(1, ((x - h.x1) * dx + (y - h.y1) * dy) / len2))
+      const dist = Math.hypot(x - (h.x1 + u * dx), y - (h.y1 + u * dy))
+      d = dist <= 5 ? dist / 5 : Infinity
+    }
+    if (d === Infinity) continue
+    const score = d - (h.priority || 0)
+    if (!best || score < best.score) best = { o: h.o, score }
+  }
+  return best?.o || null
+}
+
+function canvasPoint(e) {
+  const rect = canvasRef.value.getBoundingClientRect()
+  return { x: e.clientX - rect.left, y: e.clientY - rect.top }
+}
+
+function handleMouseDown(e) {
+  if (!lastGeom || e.button !== 0) return
+  drag.active = true
+  drag.moved = false
+  drag.startX = e.clientX
+  drag.startIndex = lastGeom.start
+}
+
+function handleMouseUp(e) {
+  const wasDrag = drag.moved
+  drag.active = false
+  if (wasDrag || !canvasRef.value) return
+  // Click: select an object (callouts highlight their source objects).
+  const { x, y } = canvasPoint(e)
+  const o = hitTest(x, y)
+  selected.value = o
+  if (!o) return
+  const sources = (o.meta?.sources || []).filter((id) => allOverlays().some((q) => q.id === id))
+  chartStore.highlightIds = o.kind === 'callout' && sources.length ? sources : [o.id]
+}
+
 function handleMouseMove(e) {
   const canvas = canvasRef.value
-  if (!canvas || !candles.value.length) return
+  if (!canvas || !candles.value.length || !lastGeom) return
+  const { x, y } = canvasPoint(e)
 
-  const rect = canvas.getBoundingClientRect()
-  const x = e.clientX - rect.left
-  const y = e.clientY - rect.top
-
-  mousePos.value = { x, y }
-
-  const padding = { left: 10, right: 65 }
-  const chartWidth = rect.width - padding.left - padding.right
-  const candleSpacing = chartWidth / candles.value.length
-
-  const idx = Math.floor((x - padding.left) / candleSpacing)
-  if (idx >= 0 && idx < candles.value.length) {
-    hoveredCandle.value = candles.value[idx]
-  } else {
-    hoveredCandle.value = null
+  if (drag.active) {
+    const shift = Math.round((drag.startX - e.clientX) / lastGeom.candleSpacing)
+    if (shift !== 0) drag.moved = true
+    const size = Math.min(view.value.size, candles.value.length)
+    const latestStart = candles.value.length - size
+    const start = Math.max(0, Math.min(latestStart, drag.startIndex + shift))
+    const anchor = start >= latestStart ? null : candles.value[start].time_utc
+    if (anchor !== view.value.anchor) view.value = { size, anchor }
+    return
   }
 
+  mousePos.value = { x, y }
+  const idx = xToIndex(lastGeom, x)
+  hoveredCandle.value = idx >= 0 && idx < candles.value.length && idx >= lastGeom.start ? candles.value[idx] : null
   renderChart()
+  const o = hitTest(x, y)
+  hoverInfo.value = o ? { o, x, y } : null
+}
+
+function handleWheel(e) {
+  if (!lastGeom || !candles.value.length) return
+  // Zoom around the candle under the cursor; it stays at the same screen spot.
+  const { x } = canvasPoint(e)
+  const pivot = xToIndex(lastGeom, x)
+  const total = candles.value.length
+  const size = Math.max(15, Math.min(total, Math.round(view.value.size * (e.deltaY > 0 ? 1.15 : 0.87))))
+  const frac = (pivot - lastGeom.start) / Math.max(1, Math.min(view.value.size, total))
+  const latestStart = total - size
+  const start = Math.max(0, Math.min(latestStart, Math.round(pivot - frac * size)))
+  view.value = { size, anchor: start >= latestStart ? null : candles.value[start].time_utc }
 }
 
 function handleMouseLeave() {
+  drag.active = false
   mousePos.value = { x: -1, y: -1 }
   hoveredCandle.value = null
+  hoverInfo.value = null
   renderChart()
+}
+
+function describe(o) {
+  const parts = [`${o.timeframe}`, o.status, sourceOf(o)]
+  return parts.filter(Boolean).join(' · ')
 }
 
 function handleKeydown(e) {
@@ -966,16 +1282,19 @@ onUnmounted(() => {
     <!-- OHLC Readout Bar -->
     <div class="chart-readout-bar">
       <div v-if="hoveredCandle" class="stat-readout">
-        <span>O: <strong class="font-mono">{{ formatPrice(hoveredCandle.open, symbol) }}</strong></span> &nbsp;
-        <span>H: <strong class="font-mono">{{ formatPrice(hoveredCandle.high, symbol) }}</strong></span> &nbsp;
-        <span>L: <strong class="font-mono">{{ formatPrice(hoveredCandle.low, symbol) }}</strong></span> &nbsp;
-        <span>C: <strong class="font-mono" :class="hoveredCandle.close >= hoveredCandle.open ? 'text-green' : 'text-red'">{{ formatPrice(hoveredCandle.close, symbol) }}</strong></span>
+        <span>O: <strong class="font-mono">{{ fmtPrice(hoveredCandle.open) }}</strong></span> &nbsp;
+        <span>H: <strong class="font-mono">{{ fmtPrice(hoveredCandle.high) }}</strong></span> &nbsp;
+        <span>L: <strong class="font-mono">{{ fmtPrice(hoveredCandle.low) }}</strong></span> &nbsp;
+        <span>C: <strong class="font-mono" :class="hoveredCandle.close >= hoveredCandle.open ? 'text-green' : 'text-red'">{{ fmtPrice(hoveredCandle.close) }}</strong></span>
       </div>
       <div v-else class="text-muted">
         <span>Hover over candles to view bar data.</span>
       </div>
 
       <div class="text-muted text-xs">
+        <span title="Mouse wheel: zoom · drag: pan · double-click: back to latest · click an object: details">
+          Wheel zoom · drag pan · dbl-click reset ·
+        </span>
         <span>Timeframe: <strong>{{ activeTf }}</strong></span>
       </div>
     </div>
@@ -1093,6 +1412,17 @@ onUnmounted(() => {
             <option value="live">Live only</option>
             <option value="historical">Historical only</option>
           </select>
+          <select v-model="objectFilter.source" class="mini-select" aria-label="Source filter">
+            <option value="all">All sources</option>
+            <option value="detected">Detected</option>
+            <option value="callout">Callouts / arrows</option>
+            <option value="scenario">Conditional scenarios</option>
+            <option value="ai">AI annotations</option>
+          </select>
+          <select v-model="objectFilter.visibility" class="mini-select" aria-label="Visibility filter">
+            <option :value="undefined">Drawn + not drawn</option>
+            <option value="drawn">Drawn only</option>
+          </select>
         </span>
         <button class="btn btn-secondary btn-sm" @click="openPanel = null">Close</button>
       </div>
@@ -1113,7 +1443,7 @@ onUnmounted(() => {
               {{ r.o.name }}
             </span>
             <span class="badge badge-neutral badge-sm">{{ r.o.timeframe }}</span>
-            <span class="text-xs text-muted">{{ r.o.status }}</span>
+            <span class="text-xs text-muted">{{ r.o.status }} · {{ r.source }}</span>
             <span class="text-xs font-mono">{{ objectPrice(r.o) }}</span>
             <span class="text-xs text-muted">{{ objectTime(r.o) }}</span>
             <button class="btn btn-secondary btn-sm obj-go" title="Switch to its timeframe and highlight it" @click="focusObject(r.o)">Show</button>
@@ -1135,9 +1465,39 @@ onUnmounted(() => {
       ref="chartContainerRef"
       class="canvas-container"
       @mousemove="handleMouseMove"
+      @mousedown="handleMouseDown"
+      @mouseup="handleMouseUp"
       @mouseleave="handleMouseLeave"
+      @wheel.prevent="handleWheel"
+      @dblclick="resetView"
     >
       <canvas ref="canvasRef" class="trading-canvas"></canvas>
+      <div
+        v-if="hoverInfo"
+        class="chart-tooltip"
+        :style="{ left: `${Math.max(4, hoverInfo.x - 230)}px`, top: `${hoverInfo.y + 14}px` }"
+      >
+        <strong>{{ hoverInfo.o.name }}</strong>
+        <span class="text-muted">{{ describe(hoverInfo.o) }}</span>
+        <span class="font-mono">{{ objectPrice(hoverInfo.o) }}</span>
+        <span v-if="hoverInfo.o.meta?.text" class="text-muted">{{ hoverInfo.o.meta.text }}</span>
+      </div>
+    </div>
+
+    <!-- Selected object details (click on the chart) -->
+    <div v-if="selected" class="object-details text-xs">
+      <span class="font-bold">{{ selected.name }}</span>
+      <span class="badge badge-neutral badge-sm">{{ selected.timeframe }}</span>
+      <span>{{ selected.status }}</span>
+      <span class="font-mono">{{ objectPrice(selected) }}</span>
+      <span class="text-muted">{{ objectTime(selected) }}</span>
+      <span class="text-muted">source: {{ selected.source }}</span>
+      <span v-if="selected.meta?.text" class="text-muted">· {{ selected.meta.text }}</span>
+      <span v-if="selected.meta?.blockers?.length" class="text-muted">· {{ selected.meta.blockers[0] }}</span>
+      <span class="details-actions">
+        <button class="btn btn-secondary btn-sm" @click="toggleHidden(selected.id); selected = null">Hide</button>
+        <button class="btn btn-secondary btn-sm" @click="selected = null">Close</button>
+      </span>
     </div>
   </div>
 </template>
@@ -1353,6 +1713,42 @@ onUnmounted(() => {
 
 .obj-go {
   padding: 1px 6px;
+}
+
+.canvas-container {
+  position: relative;
+  cursor: crosshair;
+}
+
+.chart-tooltip {
+  position: absolute;
+  z-index: 15;
+  width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  font-size: 11px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  pointer-events: none;
+}
+
+.object-details {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  border-top: 1px solid var(--border-main);
+}
+
+.details-actions {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: auto;
 }
 
 .overlay-notes {

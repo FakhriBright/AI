@@ -26,6 +26,7 @@ export const LAYERS = [
   { id: 'sr', label: 'Support & Resistance' },
   { id: 'premium_discount', label: 'Premium & Discount' },
   { id: 'trade_plan', label: 'Trade Plan' },
+  { id: 'annotations', label: 'Analysis Annotations' },
 ]
 
 // Layer Manager catalog. `unsupported` lists items the engine does not detect.
@@ -55,6 +56,11 @@ export const CATEGORIES = [
     { id: 'supply', label: 'Supply' }, { id: 'demand', label: 'Demand' },
   ] },
   { id: 'plan', label: 'Trade Plan', types: [{ id: 'plan', label: 'Trade Plan / WAITING' }] },
+  { id: 'annotations', label: 'Analysis Annotations', types: [
+    { id: 'callout', label: 'Analytical callouts' },
+    { id: 'relation', label: 'Relationship arrows' },
+    { id: 'scenario', label: 'Conditional scenarios' },
+  ], unsupported: ['Manual drawings (no drawing tools yet)'] },
 ]
 
 export const ALL_TYPES = CATEGORIES.flatMap((c) => c.types.map((t) => t.id))
@@ -67,7 +73,7 @@ export const HTF_GROUPS = [
   { id: 'sr', label: 'HTF S/R & Premium/Discount', types: ['support', 'resistance', 'supply', 'demand', 'premium', 'eq', 'discount'] },
 ]
 
-const KINDS = new Set(['hline', 'zone', 'trendline', 'arrow', 'marker', 'label', 'position'])
+const KINDS = new Set(['hline', 'zone', 'trendline', 'arrow', 'marker', 'label', 'position', 'callout', 'scenario'])
 const COLORS = new Set(['bullish', 'bearish', 'neutral', 'info', 'warning', 'entry', 'stop', 'target'])
 const STATUSES = new Set([
   'active', 'confirmed', 'candidate', 'potential', 'waiting',
@@ -109,7 +115,10 @@ export function validateOverlay(o) {
       return isPrice(o.price_low) && isPrice(o.price_high) && o.price_low < o.price_high
     case 'trendline':
     case 'arrow':
+    case 'scenario':
       return Array.isArray(o.points) && o.points.length === 2
+    case 'callout':
+      return isPrice(o.price) && Array.isArray(o.meta?.sources) && o.meta.sources.length > 0
     case 'position':
       return isPrice(o.entry) && isPrice(o.stop)
     default:
@@ -136,6 +145,9 @@ export function overlayType(o) {
     case 'plan':
     case 'chat':
       return 'plan'
+    case 'callout': return 'callout'
+    case 'rel': return 'relation'
+    case 'scn': return 'scenario'
     default:
       return o.layer === 'trade_plan' ? 'plan' : 'swing'
   }
@@ -152,6 +164,7 @@ export const chartStore = reactive({
   generatedAt: null,
   engine: {},
   keyZones: {},
+  derived: {},
   annotations: {},
   highlightIds: [],
   hiddenIds: [],
@@ -177,6 +190,7 @@ export function resetForSymbol(symbol) {
   chartStore.generatedAt = null
   chartStore.engine = {}
   chartStore.keyZones = {}
+  chartStore.derived = {}
   chartStore.annotations = {}
   chartStore.highlightIds = []
   chartStore.hiddenIds = []
@@ -184,11 +198,29 @@ export function resetForSymbol(symbol) {
 }
 
 function knownId(id) {
-  return Boolean(chartStore.engine[id] || chartStore.keyZones[id] || chartStore.annotations[id])
+  return Boolean(findOverlay(id))
 }
 
 export function findOverlay(id) {
-  return chartStore.engine[id] || chartStore.keyZones[id] || chartStore.annotations[id] || null
+  return chartStore.engine[id] || chartStore.keyZones[id] || chartStore.derived[id] || chartStore.annotations[id] || null
+}
+
+/** Where an object comes from (Object Manager grouping; never mixed). */
+export function sourceOf(o) {
+  if (chartStore.annotations[o.id]) return 'ai'
+  if (chartStore.derived[o.id]) return overlayType(o) === 'scenario' ? 'scenario' : 'callout'
+  return 'detected'
+}
+
+// Incremental update: unchanged objects keep their identity, changed ones are
+// replaced, objects missing from the new snapshot are removed.
+function mergeById(previous, next) {
+  const out = {}
+  for (const [id, o] of Object.entries(next)) {
+    const old = previous[id]
+    out[id] = old && JSON.stringify(old) === JSON.stringify(o) ? old : o
+  }
+  return out
 }
 
 /** Engine overlays from GET /analysis (action "replace"). */
@@ -201,7 +233,7 @@ export function applyOverlayPayload(payload, symbol) {
   const current = Date.parse(chartStore.generatedAt || '')
   if (Number.isFinite(current) && Number.isFinite(incoming) && incoming < current) return
 
-  chartStore.engine = toMap(payload.overlays, symbol)
+  chartStore.engine = mergeById(chartStore.engine, toMap(payload.overlays, symbol))
   chartStore.analysisId = payload.analysis_id || ''
   chartStore.generatedAt = payload.generated_at_utc || null
   chartStore.highlightIds = chartStore.highlightIds.filter(knownId)
@@ -231,7 +263,7 @@ export function applyKeyLevelZones(keyLevels, symbol) {
       })
     }
   }
-  chartStore.keyZones = toMap(zones, symbol)
+  chartStore.keyZones = mergeById(chartStore.keyZones, toMap(zones, symbol))
 }
 
 /** Commands from the chat response: create/update (upsert), highlight, clear. */
@@ -289,6 +321,7 @@ export function allOverlays() {
   return [
     ...Object.values(chartStore.engine),
     ...Object.values(chartStore.keyZones),
+    ...Object.values(chartStore.derived),
     ...Object.values(chartStore.annotations),
   ]
 }
@@ -403,6 +436,7 @@ const STANDARD_TABLE = {
   support: FROM('M15'), resistance: FROM('M15'),
   supply: [], demand: [],
   plan: ALL_TF,
+  callout: ALL_TF, relation: [], scenario: [],
 }
 
 const CLEAN_TABLE = {
@@ -417,12 +451,13 @@ const CLEAN_TABLE = {
 
 const FULL_TABLE = Object.fromEntries(ALL_TYPES.map((t) => [t, ALL_TF]))
 
+// `full` keeps its key for saved preferences; it is the DEEP ANALYSIS mode.
 export const PRESETS = {
   clean: { label: 'Clean', table: CLEAN_TABLE, relevantOnly: true, showHistory: false, labels: 'minimal',
     htf: { structure: false, fvg: false, ob: false, trendline: false, sr: true } },
   standard: { label: 'Standard', table: STANDARD_TABLE, relevantOnly: false, showHistory: false, labels: 'normal',
     htf: { structure: false, fvg: true, ob: true, trendline: false, sr: true } },
-  full: { label: 'Full', table: FULL_TABLE, relevantOnly: false, showHistory: true, labels: 'normal',
+  full: { label: 'Deep Analysis', table: FULL_TABLE, relevantOnly: false, showHistory: true, labels: 'normal',
     htf: { structure: true, fvg: true, ob: true, trendline: true, sr: true } },
 }
 
@@ -479,4 +514,116 @@ export function saveLayerPrefs(prefs) {
   } catch {
     // Storage full/blocked: preferences simply are not persisted.
   }
+}
+
+// ---------------------------------------------------------------------------
+// Derived annotations: callouts, relationship arrows, conditional scenarios.
+// Built only from objects/conditions the engine already produced; every item
+// lists its source ids in meta.sources. Nothing is detected here.
+// ---------------------------------------------------------------------------
+
+function callout(symbol, tf, key, title, price, time, sources, extra = {}) {
+  return {
+    id: `${symbol}:${tf}:callout:${key}`,
+    symbol, timeframe: tf, layer: 'annotations', kind: 'callout',
+    name: title, color: extra.color || 'info', status: 'active',
+    price, time_start: time || undefined,
+    source: `callout: ${extra.rule || key}`,
+    meta: { sources, text: extra.text || '', priority: extra.priority || 1 },
+  }
+}
+
+/**
+ * Callout rules (documented, deterministic):
+ * 1. Structure event: each BOS / CHoCH object -> "<dir> BOS confirmed" /
+ *    "<dir> CHoCH candidate" at its break candle.
+ * 2. Sweep: each BSL/SSL sweep marker -> "Buy/Sell-side liquidity swept".
+ * 3. Proximity: fresh FVG / Order Block whose engine distance_atr <= 1.0 ->
+ *    "Price inside/near <zone>" (distance from ai/desk.py, not recomputed).
+ * 4. Premium/discount: engine P/D state per timeframe -> "Price in premium /
+ *    discount / equilibrium (<tf> range)".
+ * 5. HTF conflict: market_bias.conflicts -> "Timeframe conflict".
+ */
+export function buildDerived({ symbol, marketBias, scenarios, currentPrice }) {
+  if (!symbol || chartStore.symbol !== symbol) return
+  const out = []
+  const engine = Object.values(chartStore.engine)
+
+  for (const o of engine) {
+    const type = overlayType(o)
+    const dir = o.name.includes('↑') ? 'Bullish' : o.name.includes('↓') ? 'Bearish' : ''
+    if (type === 'bos' || type === 'choch') {
+      out.push(callout(symbol, o.timeframe, `event:${o.id}`,
+        type === 'bos' ? `${dir} BOS confirmed` : `${dir} CHoCH candidate`,
+        o.price, o.time_end, [o.id],
+        { color: o.color, priority: 2, rule: 'structure event', text: o.meta?.verdict || '' }))
+    } else if (type === 'sweep') {
+      const bsl = o.id.includes(':sweep:bsl:')
+      out.push(callout(symbol, o.timeframe, `sweep:${o.id}`,
+        bsl ? 'Buy-side liquidity swept' : 'Sell-side liquidity swept',
+        o.price, o.time_start, [o.id],
+        { color: o.color, priority: 2, rule: 'liquidity sweep', text: o.meta?.verdict || '' }))
+    } else if ((type === 'fvg' || type === 'ob') && o.status === 'active') {
+      const d = o.meta?.distance_atr
+      if (typeof d === 'number' && d <= 1.0) {
+        out.push(callout(symbol, o.timeframe, `near:${o.id}`,
+          `${d === 0 ? 'Price inside' : 'Price near'} ${o.name.toLowerCase()}`,
+          (o.price_low + o.price_high) / 2, null, [o.id],
+          { color: o.color, rule: 'proximity (engine distance_atr <= 1.0)',
+            text: d === 0 ? 'Current price is inside the zone.' : `${d} ATR away (engine distance).` }))
+      }
+    } else if (type === 'eq' && o.meta?.state) {
+      const state = o.meta.state
+      out.push(callout(symbol, o.timeframe, `pd:${o.id}`,
+        `Price in ${state} (${o.timeframe} range)`, o.price, null, [o.id],
+        { color: state === 'premium' ? 'bearish' : state === 'discount' ? 'bullish' : 'neutral',
+          rule: 'premium/discount state', text: `Position ${o.meta.pos} of the dealing range.` }))
+    }
+  }
+
+  const conflicts = marketBias?.conflicts || []
+  if (conflicts.length && typeof currentPrice === 'number') {
+    out.push(callout(symbol, 'MTF', 'conflict', 'Timeframe conflict', currentPrice, null,
+      ['market_bias.conflicts'], { color: 'warning', rule: 'market_bias.conflicts', text: conflicts.slice(0, 2).join(' · ') }))
+  }
+
+  // Relationship arrows: the liquidity level that was swept -> the sweep candle.
+  for (const sweep of engine.filter((o) => overlayType(o) === 'sweep')) {
+    const side = sweep.id.includes(':sweep:bsl:') ? 'bsl' : 'ssl'
+    const level = engine.find((o) => o.timeframe === sweep.timeframe && overlayType(o) === side)
+    if (!level?.time_start || !sweep.time_start) continue
+    out.push({
+      id: `${symbol}:${sweep.timeframe}:rel:sweep:${sweep.id}`,
+      symbol, timeframe: sweep.timeframe, layer: 'annotations', kind: 'arrow',
+      name: `${side.toUpperCase()} → sweep`, color: sweep.color, status: 'confirmed',
+      points: [{ time: level.time_start, price: level.price }, { time: sweep.time_start, price: sweep.price }],
+      source: 'relationship: swept level -> sweep candle', meta: { sources: [level.id, sweep.id] },
+    })
+  }
+
+  // Conditional scenarios: engine scenarios with a trigger level only. Drawn as
+  // dashed projections to the right of the last candle, labelled CONDITIONAL,
+  // never as a prediction or a target.
+  const items = [...(scenarios?.intraday_scenarios || []), ...(scenarios?.scalp_scenarios || [])]
+  for (const sc of items) {
+    if (typeof sc.trigger_reference !== 'number' || typeof currentPrice !== 'number') continue
+    if (String(sc.status || '').includes('invalid')) continue
+    const bearish = String(sc.direction || sc.name || '').includes('bear')
+    out.push({
+      id: `${symbol}:MTF:scn:${sc.name}`,
+      symbol, timeframe: 'MTF', layer: 'annotations', kind: 'scenario',
+      name: `CONDITIONAL · ${String(sc.name).replace(/_/g, ' ')}`,
+      color: bearish ? 'bearish' : 'bullish', status: 'potential',
+      points: [{ time: null, price: currentPrice }, { time: null, price: sc.trigger_reference }],
+      source: 'scenario.trigger_reference / invalidation_reference',
+      meta: {
+        sources: [`scenario:${sc.name}`],
+        trigger: sc.trigger, invalidation: sc.invalidation,
+        invalidation_price: typeof sc.invalidation_reference === 'number' ? sc.invalidation_reference : null,
+        conviction: sc.conviction, confirmed: Boolean(sc.trigger_confirmed),
+      },
+    })
+  }
+
+  chartStore.derived = mergeById(chartStore.derived, toMap(out, symbol))
 }
