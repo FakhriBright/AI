@@ -16,9 +16,10 @@ export const LIFECYCLE_STYLE = {
   waiting: { alpha: 0.9, fill: 0.6, dash: [5, 3], width: 1.2 },
   mitigated: { alpha: 0.4, fill: 0.45, dash: [], width: 1 },
   taken: { alpha: 0.45, fill: 0.4, dash: [2, 3], width: 1, marker: 'swept' }, // swept liquidity
-  broken: { alpha: 0.4, fill: 0.4, dash: [6, 4], width: 1 },
-  invalidated: { alpha: 0.35, fill: 0.3, dash: [2, 3], width: 1, marker: 'invalid' },
-  expired: { alpha: 0.3, fill: 0.3, dash: [2, 4], width: 1 },
+  broken: { alpha: 0.35, fill: 0.35, dash: [6, 4], width: 1 },
+  // Invalidated/expired are hidden by default (history off); very faint otherwise.
+  invalidated: { alpha: 0.2, fill: 0.2, dash: [2, 3], width: 1, marker: 'invalid' },
+  expired: { alpha: 0.2, fill: 0.2, dash: [2, 4], width: 1 },
 }
 export const HISTORICAL_STYLE = { alpha: 0.3, fill: 0.35 }
 
@@ -39,9 +40,11 @@ const CONVICTION_RANK = { high: 3, medium: 2, low: 1 }
  *  3. conviction category (high > medium > low)
  *  4. confluence_score
  *  5. timeframe alignment with market_bias.htf direction
- * Tiers: PRIMARY = the top rank (several if tied on every available field),
- * LOW = low conviction, against the HTF direction, or analysis stale,
- * SECONDARY = everything else. The tier is visual only.
+ * Tiers: PRIMARY = the single top rank. If several scenarios share the top rank
+ * on every available field, the data cannot separate them: they are UNRANKED
+ * (equal priority) instead of being forced into an order. Everything else is
+ * SECONDARY. `muted` (low conviction, against HTF, or stale analysis) only
+ * lowers intensity. The tier is visual only and never changes validity.
  */
 export function rankScenarios(scenarios, { selectedName = null, htfDirection = null, stale = false } = {}) {
   const htf = String(htfDirection || '').toLowerCase()
@@ -73,18 +76,20 @@ export function rankScenarios(scenarios, { selectedName = null, htfDirection = n
     if (row.aligned === 1) reasons.push('aligned with HTF')
     if (row.aligned === -1) reasons.push('against HTF')
 
-    let tier = cmp(row, rows[0]) === 0 ? 'primary' : 'secondary'
-    if (tier !== 'primary' && (row.conviction === 'low' || row.aligned === -1)) tier = 'low'
-    if (stale) tier = 'low'
-    return { name: row.sc.name, tier, rank: i + 1, reasons }
+    const topTied = rows.filter((x) => cmp(x, rows[0]) === 0).length
+    let tier = 'secondary'
+    if (cmp(row, rows[0]) === 0) tier = topTied > 1 ? 'unranked' : 'primary'
+    const muted = stale || row.conviction === 'low' || row.aligned === -1
+    return { name: row.sc.name, tier, muted, rank: i + 1, reasons }
   })
 }
 
 export const SCENARIO_TIER_STYLE = {
-  primary: { alpha: 1, width: 2.2, label: 'PRIMARY' },
-  secondary: { alpha: 0.6, width: 1.4, label: 'SECONDARY' },
-  low: { alpha: 0.35, width: 1, label: 'LOW PRIORITY', muted: true },
+  primary: { alpha: 1, width: 2, label: 'PRIMARY' },
+  unranked: { alpha: 0.8, width: 1.5, label: 'UNRANKED' },
+  secondary: { alpha: 0.6, width: 1.2, label: 'SECONDARY' },
 }
+export const MUTED_FACTOR = 0.55
 
 // ---------------------------------------------------------------------------
 // 3. Confluence (visual relationship between existing, drawn objects)
@@ -162,7 +167,8 @@ const TYPE_SHORT = {
 }
 
 export function confluenceLabel(g) {
-  return `⧉ ${g.count} · ${g.types.map((t) => TYPE_SHORT[t] || t).join('+')} · ${g.timeframes.join(',')}`
+  const title = { bearish: 'SUPPLY', bullish: 'DEMAND' }[g.direction] || 'MIXED'
+  return `${title} CONFLUENCE · ${g.timeframes.join(' + ')} · ${g.types.map((t) => TYPE_SHORT[t] || t).join(' + ')}`
 }
 
 // ---------------------------------------------------------------------------
@@ -179,6 +185,22 @@ function overlaps(a, b) {
  * collapses labels that do not fit into "+N" groups at the anchor of the
  * group's highest-priority member. Anchors (market coordinates) never move.
  */
+let lastLayout = { sig: null, result: null }
+
+/** Same as layoutLabels, but reuses the previous result when nothing that
+ *  affects placement changed (requests, reserved areas, bounds). */
+export function layoutLabelsCached(requests, options = {}) {
+  const sig = JSON.stringify([
+    requests.map((r) => [r.key, Math.round(r.x), Math.round(r.y), Math.round(r.w), r.priority, r.text]),
+    (options.reserved || []).map((q) => [Math.round(q.l), Math.round(q.t), Math.round(q.r), Math.round(q.b)]),
+    options.bounds,
+  ])
+  if (sig === lastLayout.sig) return { ...lastLayout.result, cached: true }
+  const result = layoutLabels(requests, options)
+  lastLayout = { sig, result }
+  return result
+}
+
 export function layoutLabels(requests, { reserved = [], bounds, offsets = [0, -12, 12, -24, 24, -36, 36] } = {}) {
   const placed = []
   const taken = [...reserved]

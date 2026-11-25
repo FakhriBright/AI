@@ -387,13 +387,9 @@ export function visibleOverlays(activeTf, prefs, range = null) {
     const rank = swingRank.get(o.id)
 
     if (own) {
-      // Scenarios: primary always (when the layer is on); secondary unless minimal;
-      // low priority only with history (Deep Analysis).
-      if (type === 'scenario') {
-        const tier = o.meta?.tier
-        if (tier === 'low' && !prefs.showHistory) continue
-        if (tier === 'secondary' && prefs.labels === 'minimal') continue
-      }
+      // Scenarios: primary/unranked always (when the layer is on); secondary
+      // stays accessible (faint) except in minimal-label mode.
+      if (type === 'scenario' && o.meta?.tier === 'secondary' && prefs.labels === 'minimal') continue
       if (!prefs.showHistory && (historical || (rank !== undefined && rank >= 4))) continue
       if (prefs.relevantOnly && o.timeframe !== 'MTF') {
         if (!LIVE_STATUSES.has(o.status) || !inRange(o, range)) continue
@@ -636,7 +632,8 @@ export function buildDerived({ symbol, marketBias, scenarios, currentPrice, sele
         trigger: sc.trigger, invalidation: sc.invalidation,
         invalidation_price: typeof sc.invalidation_reference === 'number' ? sc.invalidation_reference : null,
         conviction: sc.conviction, confirmed: Boolean(sc.trigger_confirmed),
-        tier: rank?.tier || 'secondary', rank: rank?.rank, rank_reasons: rank?.reasons || [],
+        tier: rank?.tier || 'secondary', muted: Boolean(rank?.muted), rank: rank?.rank,
+        rank_reasons: rank?.reasons || [],
       },
     })
   }
