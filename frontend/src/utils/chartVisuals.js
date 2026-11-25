@@ -1,0 +1,249 @@
+/**
+ * Chart visual intelligence: pure, deterministic functions used by the chart
+ * renderer. They only INTERPRET existing analysis objects and scenario
+ * metadata for display. Nothing here detects, re-scores or changes analysis:
+ * no new signals, no new scenarios, no probability numbers.
+ */
+
+// ---------------------------------------------------------------------------
+// 1. Lifecycle style map (only statuses that exist in the overlay contract)
+// ---------------------------------------------------------------------------
+export const LIFECYCLE_STYLE = {
+  active: { alpha: 1, fill: 1, dash: [], width: 1.2 },
+  confirmed: { alpha: 1, fill: 1, dash: [], width: 1.4 },
+  candidate: { alpha: 0.9, fill: 0.7, dash: [5, 3], width: 1.2 },
+  potential: { alpha: 0.8, fill: 0.55, dash: [4, 3], width: 1.1 },
+  waiting: { alpha: 0.9, fill: 0.6, dash: [5, 3], width: 1.2 },
+  mitigated: { alpha: 0.4, fill: 0.45, dash: [], width: 1 },
+  taken: { alpha: 0.45, fill: 0.4, dash: [2, 3], width: 1, marker: 'swept' }, // swept liquidity
+  broken: { alpha: 0.4, fill: 0.4, dash: [6, 4], width: 1 },
+  invalidated: { alpha: 0.35, fill: 0.3, dash: [2, 3], width: 1, marker: 'invalid' },
+  expired: { alpha: 0.3, fill: 0.3, dash: [2, 4], width: 1 },
+}
+export const HISTORICAL_STYLE = { alpha: 0.3, fill: 0.35 }
+
+export function lifecycleStyle(status, { historical = false } = {}) {
+  const base = LIFECYCLE_STYLE[status] || LIFECYCLE_STYLE.active
+  return historical ? { ...base, alpha: Math.min(base.alpha, HISTORICAL_STYLE.alpha), fill: base.fill * HISTORICAL_STYLE.fill } : base
+}
+
+// ---------------------------------------------------------------------------
+// 2. Scenario visual priority (deterministic, from existing fields only)
+// ---------------------------------------------------------------------------
+const CONVICTION_RANK = { high: 3, medium: 2, low: 1 }
+
+/**
+ * Ranking order (each step only if the field exists):
+ *  1. engine selection (selected_scenario / trade_plan.scenario_name)
+ *  2. trigger validity (trigger_confirmed)
+ *  3. conviction category (high > medium > low)
+ *  4. confluence_score
+ *  5. timeframe alignment with market_bias.htf direction
+ * Tiers: PRIMARY = the top rank (several if tied on every available field),
+ * LOW = low conviction, against the HTF direction, or analysis stale,
+ * SECONDARY = everything else. The tier is visual only.
+ */
+export function rankScenarios(scenarios, { selectedName = null, htfDirection = null, stale = false } = {}) {
+  const htf = String(htfDirection || '').toLowerCase()
+  const rows = scenarios.map((sc) => {
+    const dir = String(sc.direction || '').toLowerCase()
+    const conviction = String(sc.conviction || '').toLowerCase()
+    const aligned = htf && ['bullish', 'bearish'].includes(htf) && dir ? (dir.includes(htf) ? 1 : -1) : 0
+    const key = [
+      selectedName && sc.name === selectedName ? 1 : 0,
+      sc.trigger_confirmed === true ? 1 : 0,
+      CONVICTION_RANK[conviction] || 0,
+      typeof sc.confluence_score === 'number' ? sc.confluence_score : 0,
+      aligned,
+    ]
+    return { sc, key, conviction, aligned }
+  })
+  const cmp = (a, b) => {
+    for (let i = 0; i < a.key.length; i += 1) if (a.key[i] !== b.key[i]) return b.key[i] - a.key[i]
+    return 0
+  }
+  rows.sort((a, b) => cmp(a, b) || String(a.sc.name).localeCompare(String(b.sc.name)))
+
+  return rows.map((row, i) => {
+    const reasons = []
+    if (row.key[0]) reasons.push('engine-selected scenario')
+    if (row.key[1]) reasons.push('trigger confirmed')
+    if (row.conviction) reasons.push(`${row.conviction} conviction`)
+    if (typeof row.sc.confluence_score === 'number') reasons.push(`confluence score ${row.sc.confluence_score}`)
+    if (row.aligned === 1) reasons.push('aligned with HTF')
+    if (row.aligned === -1) reasons.push('against HTF')
+
+    let tier = cmp(row, rows[0]) === 0 ? 'primary' : 'secondary'
+    if (tier !== 'primary' && (row.conviction === 'low' || row.aligned === -1)) tier = 'low'
+    if (stale) tier = 'low'
+    return { name: row.sc.name, tier, rank: i + 1, reasons }
+  })
+}
+
+export const SCENARIO_TIER_STYLE = {
+  primary: { alpha: 1, width: 2.2, label: 'PRIMARY' },
+  secondary: { alpha: 0.6, width: 1.4, label: 'SECONDARY' },
+  low: { alpha: 0.35, width: 1, label: 'LOW PRIORITY', muted: true },
+}
+
+// ---------------------------------------------------------------------------
+// 3. Confluence (visual relationship between existing, drawn objects)
+// ---------------------------------------------------------------------------
+const CONFLUENCE_TYPES = new Set(['fvg', 'ob', 'supply', 'demand', 'support', 'resistance', 'bsl', 'ssl', 'eqh', 'eql'])
+const LIVE = new Set(['active', 'confirmed', 'candidate', 'waiting', 'potential'])
+
+function priceRange(o) {
+  if (typeof o.price_low === 'number' && typeof o.price_high === 'number') return [o.price_low, o.price_high]
+  if (typeof o.price === 'number') return [o.price, o.price]
+  return null
+}
+
+function directionOf(o) {
+  if (o.color === 'bullish') return 'bullish'
+  if (o.color === 'bearish') return 'bearish'
+  return 'neutral'
+}
+
+/**
+ * Groups drawn objects whose price ranges share a common overlap.
+ * Rules: live status only (no historical zones), valid price boundaries, at
+ * least one rectangular zone in the group, and a non-empty common price band.
+ * Every member id is kept; members stay individually selectable.
+ */
+export function buildConfluence(items, typeOf) {
+  const candidates = items
+    .map((item) => ({ item, o: item.overlay, type: typeOf(item.overlay), range: priceRange(item.overlay) }))
+    .filter((c) => c.range && CONFLUENCE_TYPES.has(c.type) && LIVE.has(c.o.status))
+    .sort((a, b) => a.range[0] - b.range[0] || a.range[1] - b.range[1] || a.o.id.localeCompare(b.o.id))
+
+  const groups = []
+  const used = new Set()
+  for (let i = 0; i < candidates.length; i += 1) {
+    const seed = candidates[i]
+    if (used.has(seed.o.id) || seed.range[0] === seed.range[1]) continue // seed must be a zone
+    let lo = seed.range[0]
+    let hi = seed.range[1]
+    const members = [seed]
+    for (let j = 0; j < candidates.length; j += 1) {
+      const c = candidates[j]
+      if (j === i || used.has(c.o.id)) continue
+      const nlo = Math.max(lo, c.range[0])
+      const nhi = Math.min(hi, c.range[1])
+      if (nlo <= nhi) {
+        members.push(c)
+        lo = nlo
+        hi = nhi
+      }
+    }
+    if (members.length < 2) continue
+    members.forEach((m) => used.add(m.o.id))
+    const dirs = [...new Set(members.map((m) => directionOf(m.o)).filter((d) => d !== 'neutral'))]
+    const tfs = [...new Set(members.map((m) => m.o.timeframe))]
+    const types = [...new Set(members.map((m) => m.type))]
+    groups.push({
+      id: `confluence:${members.map((m) => m.o.id).sort().join('|')}`,
+      memberIds: members.map((m) => m.o.id),
+      count: members.length,
+      price_low: lo,
+      price_high: hi,
+      timeframes: tfs,
+      types,
+      direction: dirs.length === 1 ? dirs[0] : dirs.length ? 'mixed' : 'neutral',
+      statuses: [...new Set(members.map((m) => m.o.status))],
+      time_start: members.map((m) => m.o.time_start).filter(Boolean).sort().slice(-1)[0] || null,
+    })
+  }
+  return groups
+}
+
+const TYPE_SHORT = {
+  fvg: 'FVG', ob: 'OB', supply: 'Supply', demand: 'Demand', support: 'S', resistance: 'R',
+  bsl: 'BSL', ssl: 'SSL', eqh: 'EQH', eql: 'EQL',
+}
+
+export function confluenceLabel(g) {
+  return `⧉ ${g.count} · ${g.types.map((t) => TYPE_SHORT[t] || t).join('+')} · ${g.timeframes.join(',')}`
+}
+
+// ---------------------------------------------------------------------------
+// 4. Deterministic label layout (screen space only)
+// ---------------------------------------------------------------------------
+function overlaps(a, b) {
+  return a.l < b.r && a.r > b.l && a.t < b.b && a.b > b.t
+}
+
+/**
+ * requests: { key, text, x, y, w, h, align, priority, ... }
+ * reserved: rects nothing may cover (price axis, current price tag, ...)
+ * Places high priority first (ties by key), tries vertical offsets, and
+ * collapses labels that do not fit into "+N" groups at the anchor of the
+ * group's highest-priority member. Anchors (market coordinates) never move.
+ */
+export function layoutLabels(requests, { reserved = [], bounds, offsets = [0, -12, 12, -24, 24, -36, 36] } = {}) {
+  const placed = []
+  const taken = [...reserved]
+  const overflow = []
+  const ordered = [...requests].sort((a, b) => b.priority - a.priority || String(a.key).localeCompare(String(b.key)))
+
+  for (const r of ordered) {
+    let spot = null
+    const tries = r.priority >= 3 ? [...offsets, 48, -48] : r.priority >= 2 ? offsets : offsets.slice(0, 5)
+    for (const dy of tries) {
+      const left = r.align === 'right' ? r.x - r.w : r.align === 'center' ? r.x - r.w / 2 : r.x
+      const rect = { l: left, r: left + r.w, t: r.y + dy - r.h, b: r.y + dy }
+      if (bounds && (rect.l < bounds.l || rect.r > bounds.r || rect.t < bounds.t || rect.b > bounds.b)) continue
+      if (taken.some((q) => overlaps(rect, q))) continue
+      spot = rect
+      break
+    }
+    if (spot) {
+      taken.push(spot)
+      placed.push({ ...r, rect: spot })
+    } else {
+      overflow.push(r)
+    }
+  }
+
+  // Collapse overflow: nearby labels (same 14px band, 120px span) form a group.
+  const groups = []
+  for (const r of overflow) {
+    const g = groups.find((x) => Math.abs(x.y - r.y) <= 14 && Math.abs(x.x - r.x) <= 120)
+    if (g) g.items.push(r)
+    else groups.push({ x: r.x, y: r.y, items: [r] })
+  }
+  const grouped = []
+  const unplaced = []
+  const chipSpots = []
+  for (const dx of [0, -50, -100]) {
+    for (const dy of [0, -12, 12, -24, 24, -36, 36, -48, 48, -60, 60, -72, 72, -84, 84, -96, 96]) chipSpots.push([dx, dy])
+  }
+  for (const g of groups) {
+    const text = `+${g.items.length}`
+    const w = 8 + text.length * 6
+    let done = false
+    for (const [dx, dy] of chipSpots) {
+      const rect = { l: g.x - w + dx, r: g.x + dx, t: g.y + dy - 11, b: g.y + dy }
+      if (bounds && (rect.l < bounds.l || rect.r > bounds.r || rect.t < bounds.t || rect.b > bounds.b)) continue
+      if (taken.some((q) => overlaps(rect, q))) continue
+      taken.push(rect)
+      grouped.push({ text, rect, items: g.items, x: g.x, y: g.y })
+      done = true
+      break
+    }
+    if (!done) unplaced.push(g)
+  }
+  // Never lose a label: a group without room joins the nearest placed group;
+  // if there is none, it is placed at its anchor as the last resort.
+  for (const g of unplaced) {
+    if (!grouped.length) {
+      const w = 8 + `+${g.items.length}`.length * 6
+      grouped.push({ text: '', rect: { l: g.x - w, r: g.x, t: g.y - 11, b: g.y }, items: [], x: g.x, y: g.y })
+    }
+    const nearest = grouped.reduce((best, c) => (
+      Math.hypot(c.x - g.x, c.y - g.y) < Math.hypot(best.x - g.x, best.y - g.y) ? c : best
+    ))
+    nearest.items.push(...g.items)
+  }
+  for (const g of grouped) g.text = `+${g.items.length}`
+  return { placed, grouped, hiddenCount: overflow.length }
+}

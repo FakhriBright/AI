@@ -29,6 +29,13 @@ import {
   toggleHidden,
   visibleOverlays,
 } from '../utils/chartOverlays'
+import {
+  SCENARIO_TIER_STYLE,
+  buildConfluence,
+  confluenceLabel,
+  layoutLabels,
+  lifecycleStyle,
+} from '../utils/chartVisuals'
 
 const props = defineProps({
   symbol: {
@@ -78,7 +85,6 @@ const OVERLAY_COLORS = {
   target: '#10b981',
 }
 const FADED_STATUSES = HISTORICAL_STATUSES
-const DASHED_STATUSES = new Set(['candidate', 'waiting', 'potential'])
 
 const layerPrefs = ref(loadLayerPrefs())
 const now = ref(Date.now())
@@ -231,6 +237,7 @@ const managerGroups = computed(() => {
 })
 
 function objectPrice(o) {
+  if (o.visualOnly === 'group') return o.meta?.text || ''
   if (o.kind === 'zone') return `${fmtPrice(o.price_low)}–${fmtPrice(o.price_high)}`
   if (o.kind === 'position') return `E ${fmtPrice(o.entry)}`
   if (o.points?.length) return o.points.map((p) => fmtPrice(p.price)).join(' → ')
@@ -331,10 +338,12 @@ function rebuildDerived() {
     marketBias: props.marketBias,
     scenarios: props.scenarios,
     currentPrice: props.keyLevels?.current_price,
+    selectedName: props.selectedScenario?.name || null,
+    stale: isStale.value,
   })
 }
 
-watch(() => [props.marketBias, props.scenarios], rebuildDerived)
+watch(() => [props.marketBias, props.scenarios, props.selectedScenario, isStale.value], rebuildDerived)
 watch(view, () => renderChart(), { deep: true })
 
 // A new analysis snapshot means new closed candles: refresh the candles so
@@ -557,6 +566,7 @@ function renderChart() {
   const geom = {
     ctx, width, height, padding, chartWidth, chartHeight, getY, chartMin, chartMax, candleList, candleSpacing, isDark,
     allCandles, allTimes, start, future, barMs, followingLatest, hits: [], labels: [],
+    labelReqs: [], reserved: [],
   }
   lastGeom = geom
   const range = { min: chartMin, max: chartMax }
@@ -598,6 +608,26 @@ function renderChart() {
     const bodyTop = Math.min(openY, closeY)
     const bodyHeight = Math.max(1.5, Math.abs(closeY - openY))
     ctx.fillRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight)
+  }
+
+  // Current price: dashed line + axis tag (last candle close from the live feed).
+  const lastClose = allCandles[allCandles.length - 1]?.close
+  if (typeof lastClose === 'number' && lastClose >= chartMin && lastClose <= chartMax) {
+    const yp = getY(lastClose)
+    ctx.save()
+    ctx.strokeStyle = isDark ? 'rgba(20, 184, 166, 0.7)' : 'rgba(15, 118, 110, 0.7)'
+    ctx.setLineDash([2, 2])
+    ctx.beginPath(); ctx.moveTo(padding.left, yp); ctx.lineTo(width - padding.right, yp); ctx.stroke()
+    ctx.setLineDash([])
+    ctx.fillStyle = isDark ? '#14b8a6' : '#0f766e'
+    ctx.fillRect(width - padding.right + 1, yp - 8, padding.right - 2, 16)
+    ctx.fillStyle = '#ffffff'
+    ctx.font = 'bold 10px monospace'
+    ctx.textAlign = 'left'
+    ctx.fillText(fmtPrice(lastClose), width - padding.right + 4, yp + 4)
+    ctx.restore()
+    // Labels may not cover the current price marker near the axis.
+    geom.reserved.push({ l: width - padding.right - 70, r: width - padding.right, t: yp - 7, b: yp + 7 })
   }
 
   drawOverlays(geom, overlays, 'over')
@@ -668,42 +698,92 @@ function timeIndex(times, t) {
   return lo
 }
 
-// Label placement: try the requested spot, then nudge vertically; low-priority
-// labels are dropped instead of overlapping (priority 2 = always drawn).
-function placeLabel(geom, text, x, y, { align = 'right', font = '9px monospace', color, tag = false, priority = 1 } = {}) {
+// Label requests are collected while shapes are drawn and laid out once per
+// render (chartVisuals.layoutLabels): high priority first, offsets, then "+N"
+// groups. Anchors are market coordinates; only screen offsets change.
+// priority: 3 = primary scenario / trade plan / highlighted, 2 = events,
+// callouts, active zones, 1 = everything else.
+function placeLabel(geom, text, x, y, { align = 'right', font = '9px monospace', color, tag = false, priority = 1, key, kind = 'text', anchor = null, ids = [] } = {}) {
   const { ctx } = geom
   ctx.save()
-  ctx.shadowBlur = 0
-  ctx.setLineDash([])
-  ctx.font = tag ? 'bold 9px monospace' : font
-  const w = ctx.measureText(text).width + (tag ? 8 : 2)
-  const h = tag ? 13 : 11
-  const offsets = priority >= 2 ? [0, -13, 13, -26, 26, 0] : [0, -12, 12, -24, 24]
-  for (let i = 0; i < offsets.length; i += 1) {
-    const cy = y + offsets[i]
-    const left = align === 'right' ? x - w : align === 'center' ? x - w / 2 : x
-    const rect = { l: left, r: left + w, t: cy - h + 3, b: cy + 3 }
-    const free = !geom.labels.some((o) => rect.l < o.r && rect.r > o.l && rect.t < o.b && rect.b > o.t)
-    if (free || i === offsets.length - 1 && priority >= 2) {
-      geom.labels.push(rect)
-      if (tag) {
-        ctx.fillStyle = color
-        ctx.globalAlpha = Math.min(1, ctx.globalAlpha + 0.1)
-        ctx.fillRect(left, cy - 7, w, 13)
-        ctx.fillStyle = '#ffffff'
-        ctx.textAlign = 'left'
-        ctx.fillText(text, left + 4, cy + 3)
-      } else {
-        ctx.fillStyle = color
-        ctx.textAlign = 'left'
-        ctx.fillText(text, left + 1, cy)
-      }
-      ctx.restore()
-      return true
-    }
-  }
+  ctx.font = tag || kind === 'callout' ? 'bold 9px monospace' : font
+  const w = ctx.measureText(text).width + (tag || kind === 'callout' ? 10 : 2)
   ctx.restore()
-  return false
+  geom.labelReqs.push({
+    key: key || `${text}@${Math.round(x)},${Math.round(y)}`,
+    text, x, y, w, h: tag || kind === 'callout' ? 14 : 11, align, font, color, tag, kind, anchor, ids,
+    priority, alpha: ctx.globalAlpha,
+  })
+  return true
+}
+
+function flushLabels(geom) {
+  const { ctx, width, height, padding } = geom
+  const bounds = { l: padding.left + 2, r: width - padding.right - 2, t: padding.top + 2, b: height - padding.bottom - 2 }
+  const { placed, grouped } = layoutLabels(geom.labelReqs, { reserved: geom.reserved, bounds })
+  for (const r of placed) {
+    const { rect } = r
+    ctx.save()
+    ctx.globalAlpha = r.alpha
+    ctx.shadowBlur = 0
+    ctx.setLineDash([])
+    if (r.kind === 'callout') {
+      if (r.anchor) {
+        ctx.strokeStyle = r.color
+        ctx.globalAlpha = r.alpha * 0.7
+        ctx.beginPath()
+        ctx.moveTo(r.anchor.x, r.anchor.y)
+        ctx.lineTo(Math.max(rect.l, Math.min(rect.r, r.anchor.x)), r.anchor.y < rect.t ? rect.t : rect.b)
+        ctx.stroke()
+        ctx.globalAlpha = r.alpha
+        ctx.fillStyle = r.color
+        ctx.beginPath(); ctx.arc(r.anchor.x, r.anchor.y, 2.5, 0, Math.PI * 2); ctx.fill()
+      }
+      ctx.fillStyle = geom.isDark ? 'rgba(15, 23, 42, 0.92)' : 'rgba(255, 255, 255, 0.95)'
+      ctx.fillRect(rect.l, rect.t, rect.r - rect.l, rect.b - rect.t)
+      ctx.strokeStyle = r.color
+      ctx.strokeRect(rect.l, rect.t, rect.r - rect.l, rect.b - rect.t)
+      ctx.fillStyle = r.color
+      ctx.font = 'bold 9px monospace'
+      ctx.textAlign = 'left'
+      ctx.fillText(r.text, rect.l + 5, rect.b - 4)
+      if (r.ids.length) geom.hits.push({ o: r.owner, type: 'rect', ...rect, priority: 3 })
+    } else if (r.tag) {
+      ctx.fillStyle = r.color
+      ctx.globalAlpha = Math.min(1, r.alpha + 0.1)
+      ctx.fillRect(rect.l, rect.t, rect.r - rect.l, rect.b - rect.t)
+      ctx.fillStyle = '#ffffff'
+      ctx.font = 'bold 9px monospace'
+      ctx.textAlign = 'left'
+      ctx.fillText(r.text, rect.l + 5, rect.b - 4)
+    } else {
+      ctx.fillStyle = r.color
+      ctx.font = r.font
+      ctx.textAlign = 'left'
+      ctx.fillText(r.text, rect.l + 1, rect.b - 2)
+    }
+    ctx.restore()
+  }
+  // Collapsed groups: "+N" chips; hover/click lists and highlights the members.
+  for (const g of grouped) {
+    ctx.save()
+    ctx.fillStyle = geom.isDark ? 'rgba(148, 163, 184, 0.25)' : 'rgba(71, 85, 105, 0.15)'
+    ctx.fillRect(g.rect.l, g.rect.t, g.rect.r - g.rect.l, g.rect.b - g.rect.t)
+    ctx.fillStyle = geom.isDark ? '#cbd5e1' : '#334155'
+    ctx.font = 'bold 9px monospace'
+    ctx.textAlign = 'left'
+    ctx.fillText(g.text, g.rect.l + 4, g.rect.b - 2)
+    ctx.restore()
+    const ids = [...new Set(g.items.flatMap((i) => i.ids))]
+    geom.hits.push({
+      o: {
+        id: `group:${g.items.map((i) => i.key).join('|')}`, visualOnly: 'group', kind: 'label', timeframe: activeTf.value,
+        name: `${g.items.length} grouped labels`, status: 'active', price: null,
+        meta: { text: g.items.map((i) => i.text).join(' · ') }, memberIds: ids,
+      },
+      type: 'rect', ...g.rect, priority: 3,
+    })
+  }
 }
 
 function drawArrowHead(ctx, x, fromY, toY) {
@@ -712,6 +792,16 @@ function drawArrowHead(ctx, x, fromY, toY) {
   ctx.moveTo(x, toY)
   ctx.lineTo(x - 5, toY - dir * 8)
   ctx.lineTo(x + 5, toY - dir * 8)
+  ctx.closePath()
+  ctx.fill()
+}
+
+function drawLineArrow(ctx, ax, ay, bx, by, size = 7) {
+  const ang = Math.atan2(by - ay, bx - ax)
+  ctx.beginPath()
+  ctx.moveTo(bx, by)
+  ctx.lineTo(bx - size * Math.cos(ang - 0.4), by - size * Math.sin(ang - 0.4))
+  ctx.lineTo(bx - size * Math.cos(ang + 0.4), by - size * Math.sin(ang + 0.4))
   ctx.closePath()
   ctx.fill()
 }
@@ -730,15 +820,22 @@ function zoneEndX(geom, o, type) {
   return null
 }
 
+const SHORT_NAME = {
+  bsl: 'BSL', ssl: 'SSL', eqh: 'EQH', eql: 'EQL', support: 'S', resistance: 'R', supply: 'Supply', demand: 'Demand',
+}
+
 function drawOverlay(geom, item, highlighted) {
   const { overlay: o, htf, type } = item
   const { ctx, width, padding, chartWidth, getY } = geom
   const right = width - padding.right
   const color = OVERLAY_COLORS[o.color] || OVERLAY_COLORS.neutral
   const minimal = layerPrefs.value.labels === 'minimal'
-  const label = `${htf ? `[${o.timeframe}] ` : ''}${o.name}`
+  const tfTag = htf ? `${o.timeframe} · ` : ''
+  const label = `${tfTag}${o.name}`
   const fmt = (p) => fmtPrice(p)
-  const priority = highlighted || o.layer === 'trade_plan' ? 2 : 1
+  const priority = highlighted || o.layer === 'trade_plan' ? 3 : o.meta?.key && !FADED_STATUSES.has(o.status) ? 2 : 1
+  const ids = [o.id]
+  const style = item.style
 
   switch (o.kind) {
     case 'zone': {
@@ -748,8 +845,8 @@ function drawOverlay(geom, item, highlighted) {
       const yBottom = getY(o.price_low)
       const w = Math.max(2, x2 - x1)
       const base = ctx.globalAlpha
-      const fill = { premium: 0.06, discount: 0.06, supply: 0.07, demand: 0.07, fvg: 0.14, ob: 0.18 }[type] ?? 0.12
-      ctx.globalAlpha = base * (highlighted ? fill + 0.12 : fill)
+      const fill = ({ premium: 0.07, discount: 0.07, supply: 0.09, demand: 0.09, fvg: 0.16, ob: 0.2 }[type] ?? 0.12) * style.fill
+      ctx.globalAlpha = base * (highlighted ? fill + 0.14 : fill)
       ctx.fillRect(x1, yTop, w, yBottom - yTop)
       ctx.globalAlpha = base
       if (type === 'fvg') {
@@ -762,16 +859,29 @@ function drawOverlay(geom, item, highlighted) {
         ctx.beginPath(); ctx.moveTo(x1, (yTop + yBottom) / 2); ctx.lineTo(x1 + w, (yTop + yBottom) / 2); ctx.stroke()
         ctx.restore()
       } else if (type === 'ob') {
-        // Institutional zone: solid box + accent bar on the origin candle.
+        // Supply/demand block: solid box + accent bar on the origin candle.
         ctx.strokeRect(x1, yTop, w, yBottom - yTop)
         ctx.fillRect(x1, yTop, 3, yBottom - yTop)
       } else if (type === 'supply' || type === 'demand') {
         ctx.save(); ctx.setLineDash([1, 3]); ctx.strokeRect(x1, yTop, w, yBottom - yTop); ctx.restore()
-      } else if (type !== 'premium' && type !== 'discount') {
+      } else if (type === 'premium' || type === 'discount') {
+        // Dealing-range section: edge line toward the range extreme only.
+        ctx.beginPath()
+        const yEdge = type === 'premium' ? yTop : yBottom
+        ctx.moveTo(x1, yEdge); ctx.lineTo(x1 + w, yEdge)
+        ctx.stroke()
+      } else {
         ctx.strokeRect(x1, yTop, w, yBottom - yTop)
       }
-      if (!minimal || highlighted) {
-        placeLabel(geom, label, Math.min(x1 + w, right) - 4, yTop + 10, { color, priority })
+      if (!minimal || highlighted || type === 'fvg' || type === 'ob') {
+        const short = type === 'fvg' ? 'FVG' : type === 'ob' ? 'OB' : (SHORT_NAME[type] || o.name)
+        const text = type === 'fvg' || type === 'ob'
+          ? `${tfTag}${o.color === 'bullish' ? '▲' : '▼'} ${short}${o.status === 'active' ? '' : ` · ${o.status}`}`
+          : label
+        // Inside the zone, top-left: stays with the zone when zooming/panning.
+        placeLabel(geom, text, Math.max(padding.left + 2, x1 + 4), yTop + 10, {
+          align: 'left', color, priority, key: o.id, ids,
+        })
       }
       break
     }
@@ -783,20 +893,36 @@ function drawOverlay(geom, item, highlighted) {
       const major = (o.meta?.touches || 0) >= 3 || (o.meta?.timeframes || []).length >= 2
       if (major && (type === 'support' || type === 'resistance')) ctx.lineWidth += 0.6
       if (type === 'choch') ctx.setLineDash([4, 3])
+      if (type === 'eq') ctx.setLineDash([6, 2, 1, 2])
+      if (['bsl', 'ssl'].includes(type)) ctx.setLineDash([1, 3])
       ctx.beginPath()
       ctx.moveTo(x1, y)
       ctx.lineTo(x2, y)
       ctx.stroke()
       if (event) {
-        // Mark the break candle itself.
+        // Structure connector: swing level -> break candle, label on the connector.
+        ctx.beginPath()
+        ctx.arc(x1, y, 2.5, 0, Math.PI * 2)
+        ctx.fill()
         ctx.beginPath()
         ctx.moveTo(x2, y - 4); ctx.lineTo(x2 + 4, y); ctx.lineTo(x2, y + 4); ctx.lineTo(x2 - 4, y)
         ctx.closePath(); ctx.fill()
-        placeLabel(geom, `${htf ? `[${o.timeframe}] ` : ''}${type === 'bos' ? 'BOS' : 'CHoCH'}`, x2 - 6, y - 4, { color, priority: highlighted ? 2 : 1 })
+        const up = o.name.includes('↑')
+        placeLabel(geom, `${tfTag}${type === 'bos' ? 'BOS' : 'CHoCH'}`, (x1 + x2) / 2, up ? y - 3 : y + 11, {
+          align: 'center', color, priority: highlighted ? 3 : 2, key: o.id, ids, font: 'bold 9px monospace',
+        })
+      } else if (type === 'eq') {
+        placeLabel(geom, `${tfTag}EQ 50%`, x2 - 4, y - 3, { color, priority: 1, key: o.id, ids })
+      } else if (o.status === 'taken') {
+        // Swept level: subdued line + cross at its end.
+        ctx.save(); ctx.setLineDash([]); ctx.lineWidth = 1.2
+        ctx.beginPath(); ctx.moveTo(x2 - 4, y - 4); ctx.lineTo(x2 + 4, y + 4); ctx.moveTo(x2 + 4, y - 4); ctx.lineTo(x2 - 4, y + 4); ctx.stroke()
+        ctx.restore()
+        if (!minimal) placeLabel(geom, `${tfTag}${SHORT_NAME[type] || o.name} swept`, x2 - 8, y - 3, { color, priority: 1, key: o.id, ids })
       } else if (highlighted || o.layer === 'trade_plan') {
-        placeLabel(geom, `${label} ${fmt(o.price)}`, x2 - 2, y - 9, { color, tag: true, priority: 2 })
+        placeLabel(geom, `${label} ${fmt(o.price)}`, x2 - 2, y - 9, { color, tag: true, priority: 3, key: o.id, ids })
       } else if (!minimal) {
-        placeLabel(geom, label, x2 - 4, y - 3, { color })
+        placeLabel(geom, `${tfTag}${SHORT_NAME[type] || o.name}`, x2 - 4, y - 3, { color, priority, key: o.id, ids })
       }
       break
     }
@@ -807,17 +933,34 @@ function drawOverlay(geom, item, highlighted) {
       if (x1 === null || x2 === null || x2 <= x1) break
       const y1 = getY(a.price)
       const y2 = getY(b.price)
+      const isEq = type === 'eqh' || type === 'eql'
       let xe = x2
       let ye = y2
       if (o.extend) {
         xe = right
         ye = y2 + ((y2 - y1) / (x2 - x1)) * (xe - x2)
       }
+      if (isEq) {
+        // Liquidity pool: band between the equal highs/lows.
+        const base = ctx.globalAlpha
+        ctx.globalAlpha = base * 0.18
+        ctx.fillRect(x1, Math.min(y1, y2) - 3, x2 - x1, Math.abs(y2 - y1) + 6)
+        ctx.globalAlpha = base
+        ctx.setLineDash([1, 3])
+      }
       ctx.beginPath()
       ctx.moveTo(x1, y1)
       ctx.lineTo(xe, ye)
       ctx.stroke()
-      if (!minimal || highlighted) placeLabel(geom, label, x2 + 4, y2 - 4, { align: 'left', color, priority })
+      // Pivot anchors.
+      for (const [ax, ay] of [[x1, y1], [x2, y2]]) {
+        ctx.beginPath(); ctx.arc(ax, ay, 2.5, 0, Math.PI * 2); ctx.fill()
+      }
+      if (!minimal || highlighted) {
+        placeLabel(geom, isEq ? `${tfTag}${type.toUpperCase()} $$` : label, x2 + 4, y2 - 4, {
+          align: 'left', color, priority, key: o.id, ids,
+        })
+      }
       break
     }
     case 'arrow': {
@@ -832,12 +975,7 @@ function drawOverlay(geom, item, highlighted) {
         ctx.setLineDash([3, 3])
         ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke()
         ctx.setLineDash([])
-        const ang = Math.atan2(by - ay, bx - ax)
-        ctx.beginPath()
-        ctx.moveTo(bx, by)
-        ctx.lineTo(bx - 7 * Math.cos(ang - 0.4), by - 7 * Math.sin(ang - 0.4))
-        ctx.lineTo(bx - 7 * Math.cos(ang + 0.4), by - 7 * Math.sin(ang + 0.4))
-        ctx.closePath(); ctx.fill()
+        drawLineArrow(ctx, ax, ay, bx, by)
         break
       }
       const x = timeToX(geom, a.time) ?? right - 40
@@ -850,70 +988,58 @@ function drawOverlay(geom, item, highlighted) {
       ctx.stroke()
       ctx.setLineDash([])
       drawArrowHead(ctx, x, y1, y2)
-      placeLabel(geom, label, x - 8, y2 + (y2 < y1 ? -10 : 10), { color, tag: true, priority: 2 })
+      placeLabel(geom, label, x - 8, y2 + (y2 < y1 ? -10 : 10), { color, tag: true, priority: 3, key: o.id, ids })
       break
     }
     case 'callout': {
-      // Compact note box with a leader line to its anchor (actual time/price).
       const ax = timeToX(geom, o.time_start) ?? right - 4
       const ay = getY(o.price)
-      ctx.font = 'bold 9px sans-serif'
-      const text = `${htf ? `[${o.timeframe}] ` : ''}${o.name}`
-      const w = ctx.measureText(text).width + 10
-      const h = 15
-      const spots = [[-w - 14, -22], [14, -22], [-w - 14, 10], [14, 10], [-w / 2, -34], [-w / 2, 22]]
-      let box = null
-      for (const [dx, dy] of spots) {
-        const l = Math.max(padding.left + 2, Math.min(right - w - 2, ax + dx))
-        const t = ay + dy
-        const r = { l, r: l + w, t, b: t + h }
-        if (!geom.labels.some((q) => r.l < q.r && r.r > q.l && r.t < q.b && r.b > q.t)) { box = r; break }
-      }
-      if (!box) break // density limit: never stack callouts on top of each other
-      geom.labels.push(box)
-      ctx.beginPath()
-      ctx.moveTo(ax, ay)
-      ctx.lineTo(box.l + w / 2, box.t + (box.t > ay ? 0 : h))
-      ctx.globalAlpha *= 0.7
-      ctx.stroke()
-      ctx.globalAlpha /= 0.7
-      ctx.beginPath(); ctx.arc(ax, ay, 2.5, 0, Math.PI * 2); ctx.fill()
-      ctx.save()
-      ctx.shadowBlur = 0
-      ctx.fillStyle = geom.isDark ? 'rgba(15, 23, 42, 0.92)' : 'rgba(255, 255, 255, 0.95)'
-      ctx.fillRect(box.l, box.t, w, h)
-      ctx.strokeStyle = color
-      ctx.setLineDash([])
-      ctx.strokeRect(box.l, box.t, w, h)
-      ctx.fillStyle = color
-      ctx.textAlign = 'left'
-      ctx.fillText(text, box.l + 5, box.t + 11)
-      ctx.restore()
-      item.box = box
+      const text = `${tfTag}${o.name}`
+      placeLabel(geom, text, ax - 14, ay - 12, {
+        kind: 'callout', color, priority: o.meta?.priority >= 2 ? 2 : 1, key: o.id,
+        anchor: { x: ax, y: ay }, ids: o.meta?.sources || ids,
+      })
+      geom.labelReqs[geom.labelReqs.length - 1].owner = o
       break
     }
     case 'scenario': {
       // Conditional projection in the future space after the last candle only.
       if (!geom.future) break
+      const tier = SCENARIO_TIER_STYLE[o.meta?.tier] || SCENARIO_TIER_STYLE.secondary
+      const tierColor = tier.muted ? OVERLAY_COLORS.neutral : color
       const lastIdx = geom.allCandles.length - 1
       const x0 = indexToX(geom, lastIdx)
-      const x1 = indexToX(geom, lastIdx + geom.future - 2)
+      const x1 = indexToX(geom, lastIdx + geom.future - 3)
       const [a, b] = o.points
       const y0 = getY(a.price)
       const y1 = getY(b.price)
-      ctx.setLineDash([2, 4])
+      ctx.globalAlpha *= tier.alpha
+      ctx.strokeStyle = tierColor
+      ctx.fillStyle = tierColor
+      ctx.lineWidth = tier.width
+      // Trigger area: band at the trigger level across the projection space.
+      const base = ctx.globalAlpha
+      ctx.globalAlpha = base * 0.18
+      ctx.fillRect(x0, y1 - 3, right - x0, 6)
+      ctx.globalAlpha = base
+      ctx.setLineDash([3, 4])
       ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke()
-      ctx.beginPath(); ctx.arc(x1, y1, 3, 0, Math.PI * 2); ctx.stroke()
+      ctx.setLineDash([])
+      // Direction glyph after the trigger ("if confirmed"), screen-space only.
+      const dir = o.color === 'bearish' ? 1 : -1
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x1 + 12, y1 + dir * 16); ctx.stroke()
+      drawLineArrow(ctx, x1, y1, x1 + 12, y1 + dir * 16, 6)
       const inval = o.meta?.invalidation_price
       if (typeof inval === 'number') {
         const yi = getY(inval)
         ctx.setLineDash([1, 3])
         ctx.beginPath(); ctx.moveTo(x0, yi); ctx.lineTo(right, yi); ctx.stroke()
-        placeLabel(geom, `inval ${fmt(inval)}`, right - 4, yi - 3, { color, priority: 1 })
+        ctx.setLineDash([])
+        placeLabel(geom, `✕ inval ${fmt(inval)}`, right - 4, yi - 3, { color: tierColor, priority: 1, key: `${o.id}:inval`, ids })
       }
-      ctx.setLineDash([])
-      placeLabel(geom, `${o.name} · trigger ${fmt(b.price)}`, x1, y1 + (y1 < y0 ? -8 : 14), {
-        align: 'right', color, priority: 1,
+      const conv = o.meta?.conviction ? ` · ${String(o.meta.conviction).toUpperCase()}` : ''
+      placeLabel(geom, `${tier.label} · ${o.name}${conv}`, right - 4, y1 + (y1 < y0 ? -8 : 14), {
+        color: tierColor, tag: o.meta?.tier === 'primary', priority: o.meta?.tier === 'primary' ? 3 : 1, key: o.id, ids,
       })
       item.seg = [x0, y0, x1, y1]
       break
@@ -924,9 +1050,13 @@ function drawOverlay(geom, item, highlighted) {
       const y = getY(o.price)
       const up = o.position !== 'below'
       if (o.shape === 'circle') {
+        // Sweep: ring on the actual sweep candle wick.
         ctx.beginPath()
         ctx.arc(x, y, 7, 0, Math.PI * 2)
         ctx.stroke()
+        ctx.beginPath()
+        ctx.arc(x, y, 2, 0, Math.PI * 2)
+        ctx.fill()
       } else {
         const ty = up ? y - 4 : y + 4
         ctx.beginPath()
@@ -936,21 +1066,21 @@ function drawOverlay(geom, item, highlighted) {
         ctx.closePath()
         ctx.fill()
       }
-      // Minimal labels: only the two most recent swings of each kind.
       if (!minimal || highlighted || (item.swingRank ?? 0) < 2 || o.shape === 'circle') {
-        placeLabel(geom, label, x, up ? y - 13 : y + 20, {
-          align: 'center', color, priority, font: highlighted ? 'bold 10px monospace' : '9px monospace',
+        placeLabel(geom, label, x, up ? y - 12 : y + 19, {
+          align: 'center', color, priority: o.shape === 'circle' ? 2 : (item.swingRank ?? 0) < 2 ? 2 : 1, key: o.id, ids,
+          font: highlighted ? 'bold 10px monospace' : '9px monospace',
         })
       }
       break
     }
     case 'label': {
       const y = getY(o.price)
-      placeLabel(geom, label, right - 4, y, { color, tag: true, priority: 2 })
+      placeLabel(geom, label, right - 4, y, { color, tag: true, priority: 3, key: o.id, ids })
       const blocker = o.meta?.blockers?.[0]
       if (blocker) {
-        placeLabel(geom, blocker.length > 70 ? `${blocker.slice(0, 67)}…` : blocker, right - 4, y + 16, {
-          color, font: '9px sans-serif', priority: 2,
+        placeLabel(geom, blocker.length > 70 ? `${blocker.slice(0, 67)}…` : blocker, right - 4, y + 15, {
+          color, font: '9px sans-serif', priority: 2, key: `${o.id}:blocker`, ids,
         })
       }
       break
@@ -983,15 +1113,20 @@ function drawOverlay(geom, item, highlighted) {
         ctx.moveTo(x1, y)
         ctx.lineTo(right, y)
         ctx.stroke()
-        placeLabel(geom, `${name} ${fmt(price)}`, x1 + 2, y - 8, { align: 'left', color: c, tag: true, priority: 2 })
+        placeLabel(geom, `${name} ${fmt(price)}`, x1 + 2, y - 4, { align: 'left', color: c, tag: true, priority: 3, key: `${o.id}:${name}`, ids })
       }
-      placeLabel(geom, `${label}${o.rr ? ` · RR ${o.rr}` : ''}`, right - 2, yEntry + 10, {
-        color: OVERLAY_COLORS.entry, tag: true, priority: 2,
+      placeLabel(geom, `${label}${o.rr ? ` · RR ${o.rr}` : ''}`, right - 2, yEntry + 14, {
+        color: OVERLAY_COLORS.entry, tag: true, priority: 3, key: `${o.id}:rr`, ids,
       })
       break
     }
     default:
       break
+  }
+
+  // Lifecycle markers.
+  if (style.marker === 'invalid' && typeof o.price === 'number') {
+    placeLabel(geom, '✕ invalidated', right - 4, getY(o.price) + 11, { color, priority: 1, key: `${o.id}:invalid`, ids })
   }
 }
 
@@ -1005,12 +1140,55 @@ function overlayPrices(o) {
 // highlighted last so they stay on top.
 function drawPriority(item, highlightedIds) {
   return (highlightedIds.has(item.overlay.id) ? 10 : 0) + (item.htf ? 0 : 5)
-    + (item.overlay.layer === 'premium_discount' ? -3 : 0) + (item.overlay.kind === 'callout' ? 8 : 0)
+    + (item.overlay.layer === 'premium_discount' ? -3 : 0) + (item.overlay.kind === 'scenario' ? 8 : 0)
+}
+
+// Confluence: overlapping drawn objects (chartVisuals.buildConfluence). Drawn
+// as a combined band with a double gold border; members stay selectable.
+const CONFLUENCE_COLOR = '#eab308'
+
+function drawConfluence(geom, groups) {
+  const { ctx, padding, width, getY, chartMin, chartMax } = geom
+  const right = width - padding.right
+  for (const g of groups) {
+    if (g.price_high < chartMin || g.price_low > chartMax) continue
+    const x1 = timeToX(geom, g.time_start) ?? padding.left
+    let yTop = getY(g.price_high)
+    let yBottom = getY(g.price_low)
+    if (yBottom - yTop < 4) {
+      const mid = (yTop + yBottom) / 2
+      yTop = mid - 2
+      yBottom = mid + 2
+    }
+    ctx.save()
+    ctx.globalAlpha = isStale.value ? 0.5 : 1
+    ctx.fillStyle = CONFLUENCE_COLOR
+    ctx.globalAlpha *= 0.12
+    ctx.fillRect(x1, yTop, right - x1, yBottom - yTop)
+    ctx.globalAlpha = isStale.value ? 0.5 : 0.9
+    ctx.strokeStyle = CONFLUENCE_COLOR
+    ctx.lineWidth = 1
+    ctx.strokeRect(x1, yTop, right - x1, yBottom - yTop)
+    ctx.strokeRect(x1 + 2, yTop + 2, Math.max(0, right - x1 - 4), Math.max(0, yBottom - yTop - 4))
+    ctx.restore()
+    const pseudo = {
+      id: g.id, visualOnly: 'confluence', kind: 'zone', timeframe: g.timeframes.join(','),
+      name: `Confluence · ${g.count} objects`, status: g.statuses.join('/'),
+      price_low: g.price_low, price_high: g.price_high, time_start: g.time_start,
+      meta: {
+        text: `${g.types.join(' + ')} · ${g.timeframes.join(', ')} · ${g.direction}`,
+      },
+      memberIds: g.memberIds,
+    }
+    geom.hits.push({ o: pseudo, type: 'rect', l: x1, r: right, t: yTop, b: yBottom, priority: 1 })
+    placeLabel(geom, confluenceLabel(g), right - 4, yBottom + 11, {
+      color: CONFLUENCE_COLOR, priority: 2, key: g.id, ids: g.memberIds, font: 'bold 9px monospace',
+    })
+  }
 }
 
 function drawOverlays(geom, items, phase) {
   const { ctx, width, height, padding, chartMin, chartMax } = geom
-  geom.labels = geom.labels || []
   const highlightedIds = new Set(chartStore.highlightIds)
   const top = padding.top
   const bottom = height - padding.bottom
@@ -1021,6 +1199,10 @@ function drawOverlays(geom, items, phase) {
   ctx.rect(padding.left, top, width - padding.right - padding.left, bottom - top)
   ctx.clip()
 
+  if (phase === 'under' && tfPrefs.value.confluence) {
+    drawConfluence(geom, buildConfluence(items, overlayType))
+  }
+
   const ordered = items
     .filter((item) => (item.overlay.kind === 'zone') === (phase === 'under'))
     .sort((a, b) => drawPriority(a, highlightedIds) - drawPriority(b, highlightedIds))
@@ -1029,21 +1211,21 @@ function drawOverlays(geom, items, phase) {
     const o = item.overlay
     const highlighted = highlightedIds.has(o.id)
     const prices = overlayPrices(o)
-    if (prices.length && prices.every((p) => p > chartMax || p < chartMin)) {
+    if (o.kind !== 'scenario' && prices.length && prices.every((p) => p > chartMax || p < chartMin)) {
       if (highlighted || o.layer === 'trade_plan') offscreen.push(o)
       continue
     }
 
     const color = OVERLAY_COLORS[o.color] || OVERLAY_COLORS.neutral
-    const faded = FADED_STATUSES.has(o.status)
     const oldSwing = (item.swingRank ?? 0) >= 2
+    item.style = lifecycleStyle(o.status, { historical: oldSwing && !highlighted })
     ctx.save()
-    ctx.globalAlpha = (faded ? 0.35 : 1) * (oldSwing && !highlighted ? 0.5 : 1)
-      * (isStale.value ? 0.5 : 1) * (item.htf ? 0.65 : 1) * (highlighted ? 1 : 0.9)
+    ctx.globalAlpha = item.style.alpha * (isStale.value ? 0.5 : 1) * (item.htf ? 0.6 : 1) * (highlighted ? 1 : 0.92)
     ctx.strokeStyle = color
     ctx.fillStyle = color
-    ctx.lineWidth = highlighted ? 2.4 : item.htf ? 1 : 1.2
-    ctx.setLineDash(item.htf || faded || DASHED_STATUSES.has(o.status) ? [5, 4] : [])
+    ctx.lineWidth = highlighted ? 2.4 : item.htf ? 1 : item.style.width
+    // HTF references: long dashes; lifecycle dash otherwise.
+    ctx.setLineDash(item.htf ? [8, 4] : item.style.dash)
     if (highlighted) {
       ctx.shadowColor = color
       ctx.shadowBlur = 8
@@ -1054,22 +1236,20 @@ function drawOverlays(geom, items, phase) {
   }
   ctx.restore()
 
-  // Highlighted objects outside the visible price range: edge tags instead of
-  // silently dropping them (the chart range is never stretched by overlays).
   if (phase === 'over') {
+    // Highlighted objects outside the visible price range: edge tags instead of
+    // silently dropping them (the chart range is never stretched by overlays).
     for (const o of offscreen.slice(0, 4)) {
       const above = overlayPrices(o)[0] > chartMax
-      ctx.save()
-      ctx.globalAlpha = isStale.value ? 0.5 : 1
       placeLabel(
         geom,
         `${above ? '▲' : '▼'} ${o.name} ${fmtPrice(overlayPrices(o)[0])}`,
         width - padding.right - 4,
-        above ? top + 8 : bottom - 8,
-        { color: OVERLAY_COLORS[o.color] || OVERLAY_COLORS.neutral, tag: true, priority: 2 }
+        above ? top + 14 : bottom - 4,
+        { color: OVERLAY_COLORS[o.color] || OVERLAY_COLORS.neutral, tag: true, priority: 3, key: `edge:${o.id}`, ids: [o.id] }
       )
-      ctx.restore()
     }
+    flushLabels(geom)
   }
 }
 
@@ -1100,8 +1280,7 @@ function registerHit(geom, item) {
       if (item.seg) add({ type: 'seg', x1: item.seg[0], y1: item.seg[1], x2: item.seg[2], y2: item.seg[3] })
       break
     case 'callout':
-      if (item.box) add({ type: 'rect', l: item.box.l, r: item.box.r, t: item.box.t, b: item.box.b, priority: 3 })
-      break
+      break // hit area added when the callout box is placed (flushLabels)
     case 'marker': {
       const x = timeToX(geom, o.time_start)
       if (x !== null) add({ type: 'pt', x, y: getY(o.price), priority: 2 })
@@ -1164,7 +1343,13 @@ function handleMouseUp(e) {
   const o = hitTest(x, y)
   selected.value = o
   if (!o) return
-  const sources = (o.meta?.sources || []).filter((id) => allOverlays().some((q) => q.id === id))
+  const known = new Set(allOverlays().map((q) => q.id))
+  if (o.memberIds) {
+    // Confluence / grouped labels: highlight the underlying objects individually.
+    chartStore.highlightIds = o.memberIds.filter((id) => known.has(id))
+    return
+  }
+  const sources = (o.meta?.sources || []).filter((id) => known.has(id))
   chartStore.highlightIds = o.kind === 'callout' && sources.length ? sources : [o.id]
 }
 
@@ -1214,7 +1399,9 @@ function handleMouseLeave() {
 }
 
 function describe(o) {
+  if (o.visualOnly) return `${o.timeframe} · ${o.status} · visual grouping`
   const parts = [`${o.timeframe}`, o.status, sourceOf(o)]
+  if (o.meta?.tier) parts.push(`${o.meta.tier} priority (${(o.meta.rank_reasons || []).join(', ') || 'equal'})`)
   return parts.filter(Boolean).join(' · ')
 }
 
@@ -1495,7 +1682,7 @@ onUnmounted(() => {
       <span v-if="selected.meta?.text" class="text-muted">· {{ selected.meta.text }}</span>
       <span v-if="selected.meta?.blockers?.length" class="text-muted">· {{ selected.meta.blockers[0] }}</span>
       <span class="details-actions">
-        <button class="btn btn-secondary btn-sm" @click="toggleHidden(selected.id); selected = null">Hide</button>
+        <button v-if="!selected.visualOnly" class="btn btn-secondary btn-sm" @click="toggleHidden(selected.id); selected = null">Hide</button>
         <button class="btn btn-secondary btn-sm" @click="selected = null">Close</button>
       </span>
     </div>

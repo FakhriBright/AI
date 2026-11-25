@@ -13,6 +13,7 @@
  * only decides what is drawn. It never alters or deletes a detection result.
  */
 import { reactive } from 'vue'
+import { rankScenarios } from './chartVisuals.js'
 
 export const TIMEFRAMES = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1']
 
@@ -60,7 +61,8 @@ export const CATEGORIES = [
     { id: 'callout', label: 'Analytical callouts' },
     { id: 'relation', label: 'Relationship arrows' },
     { id: 'scenario', label: 'Conditional scenarios' },
-  ], unsupported: ['Manual drawings (no drawing tools yet)'] },
+    { id: 'confluence', label: 'Confluence zones (overlapping objects)' },
+  ], unsupported: ['Manual drawings (no drawing tools yet)', 'BPR / IFVG / Trend channel (not detected by engine)'] },
 ]
 
 export const ALL_TYPES = CATEGORIES.flatMap((c) => c.types.map((t) => t.id))
@@ -385,6 +387,13 @@ export function visibleOverlays(activeTf, prefs, range = null) {
     const rank = swingRank.get(o.id)
 
     if (own) {
+      // Scenarios: primary always (when the layer is on); secondary unless minimal;
+      // low priority only with history (Deep Analysis).
+      if (type === 'scenario') {
+        const tier = o.meta?.tier
+        if (tier === 'low' && !prefs.showHistory) continue
+        if (tier === 'secondary' && prefs.labels === 'minimal') continue
+      }
       if (!prefs.showHistory && (historical || (rank !== undefined && rank >= 4))) continue
       if (prefs.relevantOnly && o.timeframe !== 'MTF') {
         if (!LIVE_STATUSES.has(o.status) || !inRange(o, range)) continue
@@ -436,7 +445,7 @@ const STANDARD_TABLE = {
   support: FROM('M15'), resistance: FROM('M15'),
   supply: [], demand: [],
   plan: ALL_TF,
-  callout: ALL_TF, relation: [], scenario: [],
+  callout: ALL_TF, relation: [], scenario: ALL_TF, confluence: ALL_TF,
 }
 
 const CLEAN_TABLE = {
@@ -447,6 +456,7 @@ const CLEAN_TABLE = {
   bsl: ALL_TF, ssl: ALL_TF, sweep: ALL_TF,
   support: FROM('M15'), resistance: FROM('M15'),
   plan: ALL_TF,
+  scenario: ALL_TF,
 }
 
 const FULL_TABLE = Object.fromEntries(ALL_TYPES.map((t) => [t, ALL_TF]))
@@ -544,7 +554,7 @@ function callout(symbol, tf, key, title, price, time, sources, extra = {}) {
  *    discount / equilibrium (<tf> range)".
  * 5. HTF conflict: market_bias.conflicts -> "Timeframe conflict".
  */
-export function buildDerived({ symbol, marketBias, scenarios, currentPrice }) {
+export function buildDerived({ symbol, marketBias, scenarios, currentPrice, selectedName = null, stale = false }) {
   if (!symbol || chartStore.symbol !== symbol) return
   const out = []
   const engine = Object.values(chartStore.engine)
@@ -605,10 +615,15 @@ export function buildDerived({ symbol, marketBias, scenarios, currentPrice }) {
   // dashed projections to the right of the last candle, labelled CONDITIONAL,
   // never as a prediction or a target.
   const items = [...(scenarios?.intraday_scenarios || []), ...(scenarios?.scalp_scenarios || [])]
+    .filter((sc) => typeof sc.trigger_reference === 'number' && !String(sc.status || '').includes('invalid'))
+  // Visual priority only (see chartVisuals.rankScenarios); never changes validity.
+  const ranks = Object.fromEntries(
+    rankScenarios(items, { selectedName, htfDirection: marketBias?.htf?.direction, stale }).map((r) => [r.name, r])
+  )
   for (const sc of items) {
-    if (typeof sc.trigger_reference !== 'number' || typeof currentPrice !== 'number') continue
-    if (String(sc.status || '').includes('invalid')) continue
+    if (typeof currentPrice !== 'number') continue
     const bearish = String(sc.direction || sc.name || '').includes('bear')
+    const rank = ranks[sc.name]
     out.push({
       id: `${symbol}:MTF:scn:${sc.name}`,
       symbol, timeframe: 'MTF', layer: 'annotations', kind: 'scenario',
@@ -621,6 +636,7 @@ export function buildDerived({ symbol, marketBias, scenarios, currentPrice }) {
         trigger: sc.trigger, invalidation: sc.invalidation,
         invalidation_price: typeof sc.invalidation_reference === 'number' ? sc.invalidation_reference : null,
         conviction: sc.conviction, confirmed: Boolean(sc.trigger_confirmed),
+        tier: rank?.tier || 'secondary', rank: rank?.rank, rank_reasons: rank?.reasons || [],
       },
     })
   }
