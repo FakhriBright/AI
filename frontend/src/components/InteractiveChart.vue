@@ -36,6 +36,7 @@ import {
   assignEmphasis,
   computeAutoscale,
   scenarioBadge,
+  stabilizeScale,
   shortScenarioName,
   tfProfile,
   buildConfluence,
@@ -151,6 +152,7 @@ const objectFilter = ref({ tf: 'current', status: 'all', source: 'all' })
 const view = ref({ size: DEFAULT_VISIBLE, anchor: null })
 const drag = { active: false, moved: false, startX: 0, startIndex: 0 }
 let lastGeom = null
+let scaleState = null // automatic price range with hysteresis (viewport stability)
 const hoverInfo = ref(null) // { o, x, y }
 const selected = ref(null) // pinned object details
 
@@ -534,10 +536,14 @@ function renderChart() {
   const triggerRef = props.selectedScenario?.trigger_reference
   const invalidationRef = props.selectedScenario?.invalidation_reference
   const livePrice = liveBid.value ?? allCandles[allCandles.length - 1]?.close
-  const scale = computeAutoscale(candleList, {
+  // Hysteresis: the range only changes when the candles need it, not on every
+  // tick; it starts fresh when symbol, timeframe or the zoom/pan window change.
+  const viewportKey = `${props.symbol}|${activeTf.value}|${followingLatest ? 'latest' : start}|${size}|${future}|${height}`
+  const scale = stabilizeScale(scaleState, computeAutoscale(candleList, {
     currentPrice: followingLatest ? livePrice : null,
     refs: [triggerRef, invalidationRef],
-  })
+  }), viewportKey)
+  scaleState = scale
   const chartMin = scale.min
   const chartMax = scale.max
   const adjustedRange = chartMax - chartMin
@@ -925,6 +931,8 @@ function drawOverlay(geom, item, highlighted) {
       const gain = FILL_GAIN[o.color] ?? 1
       const fill = ({ premium: 0.06, discount: 0.06, supply: 0.1, demand: 0.1, fvg: 0.16, ob: 0.2 }[type] ?? 0.12)
         * style.fill * gain * (consolidated ? 0.35 : 1) * (EMPHASIS_STYLE[emph]?.fill ?? 1)
+        // HTF backgrounds must not dominate local price action (execution charts most).
+        * (htf ? (type === 'premium' || type === 'discount' ? 0.3 : tfProfile(activeTf.value).label === 'EXECUTION' ? 0.55 : 0.8) : 1)
       ctx.fillStyle = FILL_COLOR[o.color] || color
       ctx.globalAlpha = Math.min(1, base * (highlighted ? fill + 0.14 : fill))
       ctx.fillRect(x1, yTop, w, yBottom - yTop)
@@ -1191,18 +1199,19 @@ function drawOverlay(geom, item, highlighted) {
         }
       }
 
-      // Projection path: current price -> trigger -> target / direction.
+      // Projection path between real prices only: current price -> trigger, and
+      // trigger -> target when the trade plan provides one. No artificial
+      // continuation is drawn when the target is unavailable.
       ctx.lineWidth = strong ? 2 : 1.2
       ctx.setLineDash(strong ? [6, 4] : [3, 4])
-      const ex = yG !== null ? xE : Math.min(xE, xT + 46)
-      const ey = yG !== null ? yG : yT + dir * (strong ? 28 : 16)
       ctx.beginPath()
       ctx.moveTo(xNow, yNow)
       ctx.lineTo(xT, yT)
-      ctx.lineTo(ex, ey)
+      if (yG !== null) ctx.lineTo(xE, yG)
       ctx.stroke()
       ctx.setLineDash([])
-      drawLineArrow(ctx, xT, yT, ex, ey, strong ? 8 : 6)
+      if (yG !== null) drawLineArrow(ctx, xT, yT, xE, yG, strong ? 8 : 6)
+      else if (Math.hypot(xT - xNow, yT - yNow) > 10) drawLineArrow(ctx, xNow, yNow, xT, yT, strong ? 7 : 5)
       ctx.beginPath(); ctx.arc(xT, yT, strong ? 4 : 3, 0, Math.PI * 2); ctx.fill()
 
       placeLabel(geom, scenarioBadge(o), xT - 8, yT + (dir > 0 ? -10 : 18), {

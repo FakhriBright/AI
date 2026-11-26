@@ -213,14 +213,26 @@ export function layoutLabels(requests, { reserved = [], bounds, offsets = [0, -1
     let spot = null
     // Primary labels may move further; secondary labels barely move and are
     // grouped instead of being pushed around the chart.
-    const tries = r.priority >= 3 ? [...offsets, 48, -48] : r.priority >= 2 ? offsets : [0, -12, 12]
-    for (const dy of tries) {
+    const dys = r.priority >= 3 ? [...offsets, 48, -48, 60, -60] : r.priority >= 2 ? offsets : [0, -12, 12]
+    // Primary labels may also shift sideways before giving up.
+    const dxs = r.priority >= 3 ? [0, -80, -160, 80] : [0]
+    const fit = (rect) => !bounds || (rect.l >= bounds.l && rect.r <= bounds.r && rect.t >= bounds.t && rect.b <= bounds.b)
+    for (const dx of dxs) {
+      for (const dy of dys) {
+        const left = (r.align === 'right' ? r.x - r.w : r.align === 'center' ? r.x - r.w / 2 : r.x) + dx
+        const rect = { l: left, r: left + r.w, t: r.y + dy - r.h, b: r.y + dy }
+        if (!fit(rect) || taken.some((q) => overlaps(rect, q))) continue
+        spot = rect
+        break
+      }
+      if (spot) break
+    }
+    if (!spot && r.priority >= 3) {
+      // Never collapse a primary label: last resort, at its anchor clamped into view.
       const left = r.align === 'right' ? r.x - r.w : r.align === 'center' ? r.x - r.w / 2 : r.x
-      const rect = { l: left, r: left + r.w, t: r.y + dy - r.h, b: r.y + dy }
-      if (bounds && (rect.l < bounds.l || rect.r > bounds.r || rect.t < bounds.t || rect.b > bounds.b)) continue
-      if (taken.some((q) => overlaps(rect, q))) continue
-      spot = rect
-      break
+      const l = bounds ? Math.min(Math.max(left, bounds.l), bounds.r - r.w) : left
+      const b = bounds ? Math.min(Math.max(r.y, bounds.t + r.h), bounds.b) : r.y
+      spot = { l, r: l + r.w, t: b - r.h, b }
     }
     if (spot) {
       taken.push(spot)
@@ -259,6 +271,30 @@ export function layoutLabels(requests, { reserved = [], bounds, offsets = [0, -1
     }
     if (!done) unplaced.push(g)
   }
+  // Secondary-only clusters (priority 1) do not get their own chip: they join a
+  // single "+N more" chip in the plot corner (still listed on hover/click).
+  // Only clusters that contain an important label keep a local chip.
+  const global = []
+  for (let i = grouped.length - 1; i >= 0; i -= 1) {
+    if (grouped[i].items.every((it) => it.priority < 2)) {
+      global.push(...grouped[i].items)
+      grouped.splice(i, 1)
+    }
+  }
+  for (let i = unplaced.length - 1; i >= 0; i -= 1) {
+    if (unplaced[i].items.every((it) => it.priority < 2)) {
+      global.push(...unplaced[i].items)
+      unplaced.splice(i, 1)
+    }
+  }
+  if (global.length) {
+    const text = `+${global.length} more`
+    const w = 8 + text.length * 6
+    const l = bounds ? bounds.l + 2 : 2
+    const t = bounds ? bounds.t + 2 : 2
+    grouped.push({ text, rect: { l, r: l + w, t, b: t + 11 }, items: global, x: l + w, y: t + 11, global: true })
+  }
+
   // Never lose a label: a group without room joins the nearest placed group;
   // if there is none, it is placed at its anchor as the last resort.
   for (const g of unplaced) {
@@ -271,7 +307,7 @@ export function layoutLabels(requests, { reserved = [], bounds, offsets = [0, -1
     ))
     nearest.items.push(...g.items)
   }
-  for (const g of grouped) g.text = `+${g.items.length}`
+  for (const g of grouped) g.text = g.global ? `+${g.items.length} more` : `+${g.items.length}`
   return { placed, grouped, hiddenCount: overflow.length }
 }
 
@@ -402,4 +438,28 @@ export function scenarioBadge(o) {
   const tier = { primary: 'PRIMARY', unranked: 'UNRANKED', secondary: 'SECONDARY' }[o.meta?.tier] || 'SECONDARY'
   const counter = (o.meta?.rank_reasons || []).includes('against HTF') || /counter/i.test(o.name || '')
   return `${tier} ${dir}${counter ? ' · COUNTERTREND' : ''}`
+}
+
+// ---------------------------------------------------------------------------
+// 8. Viewport stability (hysteresis for the automatic price range)
+// ---------------------------------------------------------------------------
+/**
+ * Keeps the previous automatic range while the new candle-based range still
+ * fits inside it and the previous one is not much wider (<= 1.6x). Expands
+ * only when needed, shrinks only when clearly too wide, and starts fresh when
+ * the viewport key changes (symbol, timeframe, zoom/pan window). This avoids
+ * the scale moving on every tick. Pure; market coordinates are untouched.
+ */
+export function stabilizeScale(prev, next, key, maxWiden = 1.6) {
+  if (!next) return prev
+  const fresh = { min: next.min, max: next.max, key }
+  if (!prev || prev.key !== key) return fresh
+  const nextSpan = next.max - next.min
+  const fits = next.min >= prev.min && next.max <= prev.max
+  if (fits && prev.max - prev.min <= nextSpan * maxWiden) return prev
+  if (!fits) {
+    const union = { min: Math.min(prev.min, next.min), max: Math.max(prev.max, next.max), key }
+    if (union.max - union.min <= nextSpan * maxWiden) return union
+  }
+  return fresh
 }
