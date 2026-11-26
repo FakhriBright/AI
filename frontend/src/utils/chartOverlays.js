@@ -626,13 +626,15 @@ export function buildDerived({ symbol, marketBias, scenarios, currentPrice, sele
   )
   for (const sc of items) {
     if (typeof currentPrice !== 'number') continue
-    const bearish = String(sc.direction || sc.name || '').includes('bear')
+    // Direction as the engine wrote it; a mixed/undirected scenario stays neutral.
+    const dirText = String(sc.direction || sc.name || '')
+    const color = dirText.includes('bear') ? 'bearish' : dirText.includes('bull') ? 'bullish' : 'neutral'
     const rank = ranks[sc.name]
     out.push({
       id: `${symbol}:MTF:scn:${sc.name}`,
       symbol, timeframe: 'MTF', layer: 'annotations', kind: 'scenario',
       name: `CONDITIONAL · ${String(sc.name).replace(/_/g, ' ')}`,
-      color: bearish ? 'bearish' : 'bullish', status: 'potential',
+      color, status: 'potential',
       points: [{ time: null, price: currentPrice }, { time: null, price: sc.trigger_reference }],
       source: 'scenario.trigger_reference / invalidation_reference',
       meta: {

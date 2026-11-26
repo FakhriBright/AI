@@ -5,11 +5,11 @@ import { formatPrice } from '../utils/formatters'
 const props = defineProps({
   symbols: {
     type: Array,
-    default: () => ['EURUSDm', 'XAUUSDm'],
+    default: () => ['XAUUSDm', 'EURUSDm'],
   },
   selectedSymbol: {
     type: String,
-    default: 'EURUSDm',
+    default: 'XAUUSDm',
   },
   currentPrice: {
     type: [Number, String],

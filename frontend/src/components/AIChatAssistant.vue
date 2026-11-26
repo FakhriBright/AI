@@ -7,7 +7,7 @@ import { STALE_AFTER_MS, applyChartCommand, chartStore } from '../utils/chartOve
 const props = defineProps({
   symbol: {
     type: String,
-    default: 'EURUSDm',
+    default: 'XAUUSDm',
   },
   analysisData: {
     type: Object,
@@ -51,12 +51,18 @@ const analysisStale = computed(() => {
 const marketBias = computed(() => props.analysisData?.market_bias?.overall || 'Neutral')
 const marketStructure = computed(() => {
   const mtf = props.analysisData?.multi_timeframe?.timeframes?.M5
-  return mtf?.structure || mtf?.trend || 'Lower Highs'
+  return mtf?.structure || mtf?.trend || '—'
 })
+
+// Chat history sent to the AI starts at the last symbol switch, so answers
+// never mix in the previous symbol's conversation (context is fetched per
+// symbol by the backend).
+let historyStart = 0
 
 watch(
   () => props.symbol,
   (newSym) => {
+    historyStart = messages.value.length
     messages.value.push({
       role: 'assistant',
       content: `Active context updated to **${newSym}**. Ask about the latest technical setup.`,
@@ -90,7 +96,7 @@ async function handleSendMessage(textToSend) {
   isLoading.value = true
 
   try {
-    const historyPayload = messages.value.map(m => ({
+    const historyPayload = messages.value.slice(historyStart).map(m => ({
       role: m.role,
       content: m.content,
     }))

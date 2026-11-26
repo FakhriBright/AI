@@ -4,7 +4,7 @@ import { formatPrice } from '../utils/formatters'
 
 const props = defineProps({
   keyLevels: { type: Object, default: () => ({}) },
-  symbol: { type: String, default: 'EURUSDm' },
+  symbol: { type: String, default: 'XAUUSDm' },
 })
 
 const supports = computed(() => props.keyLevels?.supports?.slice(0, 3) || [])

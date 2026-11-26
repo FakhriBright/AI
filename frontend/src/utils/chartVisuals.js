@@ -66,10 +66,14 @@ export function rankScenarios(scenarios, { selectedName = null, htfDirection = n
     return 0
   }
   rows.sort((a, b) => cmp(a, b) || String(a.sc.name).localeCompare(String(b.sc.name)))
+  // The engine selected a scenario that is not among these (e.g. a "wait"
+  // scenario without a trigger level): it chose none of them, so none is PRIMARY.
+  const selectedElsewhere = Boolean(selectedName) && !scenarios.some((sc) => sc.name === selectedName)
 
   return rows.map((row, i) => {
     const reasons = []
     if (row.key[0]) reasons.push('engine-selected scenario')
+    if (selectedElsewhere) reasons.push('engine selected another scenario')
     if (row.key[1]) reasons.push('trigger confirmed')
     if (row.conviction) reasons.push(`${row.conviction} conviction`)
     if (typeof row.sc.confluence_score === 'number') reasons.push(`confluence score ${row.sc.confluence_score}`)
@@ -78,7 +82,7 @@ export function rankScenarios(scenarios, { selectedName = null, htfDirection = n
 
     const topTied = rows.filter((x) => cmp(x, rows[0]) === 0).length
     let tier = 'secondary'
-    if (cmp(row, rows[0]) === 0) tier = topTied > 1 ? 'unranked' : 'primary'
+    if (cmp(row, rows[0]) === 0) tier = topTied > 1 || selectedElsewhere ? 'unranked' : 'primary'
     const muted = stale || row.conviction === 'low' || row.aligned === -1
     return { name: row.sc.name, tier, muted, rank: i + 1, reasons }
   })
@@ -438,7 +442,7 @@ export function computeAutoscale(candles, { currentPrice = null, refs = [], pad 
 
 /** Compact direction word for scenario labels. */
 export function scenarioBadge(o) {
-  const dir = o.color === 'bearish' ? 'BEARISH' : 'BULLISH'
+  const dir = o.color === 'bearish' ? 'BEARISH' : o.color === 'bullish' ? 'BULLISH' : 'MIXED'
   const tier = { primary: 'PRIMARY', unranked: 'UNRANKED', secondary: 'SECONDARY' }[o.meta?.tier] || 'SECONDARY'
   const counter = (o.meta?.rank_reasons || []).includes('against HTF') || /counter/i.test(o.name || '')
   return `${tier} ${dir}${counter ? ' · COUNTERTREND' : ''}`
@@ -459,4 +463,143 @@ export function stabilizeScale(prev, next, key) {
   if (!prev || prev.key !== key) return { min: next.min, max: next.max, key }
   if (next.min >= prev.min && next.max <= prev.max) return prev
   return { min: Math.min(prev.min, next.min), max: Math.max(prev.max, next.max), key }
+}
+
+// ---------------------------------------------------------------------------
+// 9. Market read (summary of the EXISTING engine output; no new analysis)
+// ---------------------------------------------------------------------------
+/**
+ * Direction = market_bias.overall exactly as the engine computed it (never
+ * re-derived from single FVGs or OBs). The rest only points at objects the
+ * engine already produced: last BOS/CHoCH of the chart timeframe, nearest
+ * active liquidity above/below, nearest active FVG/OB/supply/demand, and the
+ * selected scenario's own trigger / invalidation text. No numbers are invented:
+ * a missing reference is reported as missing.
+ */
+export const READ_TFS = ['M5', 'M15', 'H1', 'H4', 'D1']
+
+const PLAN_STATE = {
+  waiting: 'WAITING FOR CONFIRMATION',
+  confirmed_needs_stop: 'TRIGGERED · NEEDS STOP',
+  confirmed_needs_risk: 'TRIGGERED · NEEDS RISK',
+  confirmed_needs_target: 'TRIGGERED · NEEDS TARGET',
+  ready_for_manual_review: 'READY FOR MANUAL REVIEW',
+}
+
+export function normDirection(d) {
+  const s = String(d || '').toLowerCase()
+  if (!s) return null
+  return s.includes('bull') ? 'bullish' : s.includes('bear') ? 'bearish' : s.includes('mix') ? 'mixed' : 'neutral'
+}
+
+const lo = (o) => o.price_low ?? o.price
+const hi = (o) => o.price_high ?? o.price
+const when = (o) => String(o.time_end || o.time_start || '')
+
+export function buildMarketRead({
+  tf, marketBias = null, mtf = null, overlays = [], typeOf, currentPrice = null,
+  scenario = null, tradePlan = null, stale = false, fmt = String,
+} = {}) {
+  if (!marketBias && !mtf) return null
+  const tfs = mtf?.timeframes || {}
+  // Engine text as written; long float artefacts (1.0962749999999999) are shown
+  // with the symbol's price digits (display only).
+  const words = (s) => String(s || '').replace(/_/g, ' ').replace(/\s+/g, ' ').trim()
+    .replace(/\d+\.\d{6,}/g, (m) => fmt(Number(m)))
+  const scope = new Set([tf, ...tfProfile(tf).htfTimeframes])
+  const live = overlays.filter((o) => !['mitigated', 'taken', 'broken', 'expired', 'invalidated'].includes(o.status))
+  const typed = (types, o) => types.includes(typeOf(o))
+  const price = typeof currentPrice === 'number' ? currentPrice : null
+
+  // A. Direction and plan state (engine values only)
+  const direction = normDirection(marketBias?.overall) || 'neutral'
+  const conflicts = marketBias?.conflicts || []
+  const headline = {
+    bullish: 'BULLISH BIAS', bearish: 'BEARISH BIAS',
+    mixed: conflicts.length ? 'MIXED · TIMEFRAMES CONFLICT' : 'MIXED', neutral: 'NEUTRAL / RANGING',
+  }[direction]
+  const planStatus = String(tradePlan?.status || '').toLowerCase()
+  const state = stale ? 'stale' : planStatus || (scenario?.trigger_confirmed ? 'triggered' : 'waiting')
+  const stateText = stale ? 'ANALYSIS STALE'
+    : PLAN_STATE[planStatus] || (planStatus ? words(planStatus).toUpperCase()
+      : scenario?.trigger_confirmed ? 'TRIGGER CONFIRMED' : PLAN_STATE.waiting)
+
+  // B. Multi-timeframe context
+  const trends = READ_TFS.filter((t) => tfs[t]).map((t) => ({
+    tf: t, trend: normDirection(tfs[t].trend) || 'neutral', active: t === tf,
+  }))
+  const groups = [['HTF', marketBias?.htf], ['INTRADAY', marketBias?.intraday], ['ENTRY', marketBias?.entry]]
+    .filter(([, g]) => g)
+    .map(([name, g]) => ({ name, dir: normDirection(g.direction) || 'neutral', timeframes: g.timeframes || [], active: (g.timeframes || []).includes(tf) }))
+  const local = normDirection(tfs[tf]?.trend)
+  const htf = normDirection(marketBias?.htf?.direction)
+  const clear = (d) => d === 'bullish' || d === 'bearish'
+  const alignment = !clear(local) || !clear(htf) ? 'unclear' : local === htf ? 'aligned' : 'conflict'
+  const alignmentText = local
+    ? `${tf} ${local} · ${alignment === 'aligned' ? 'aligned with' : alignment === 'conflict' ? 'against' : 'vs'} HTF ${htf || 'n/a'}`
+    : `${tf}: no timeframe context`
+
+  const lines = []
+  // C1. Structure of the chart timeframe
+  const event = live.filter((o) => o.timeframe === tf && typed(['bos', 'choch'], o))
+    .sort((a, b) => when(b).localeCompare(when(a)))[0]
+  lines.push({
+    key: 'structure', label: 'Structure',
+    text: `${tf} ${words(tfs[tf]?.structure) || 'n/a'}${event ? ` · last ${event.name} ${fmt(event.price)} (${event.status})` : ' · no BOS/CHoCH in this analysis'}`,
+    ids: event ? [event.id] : [], tone: event ? normDirection(event.color) : null,
+  })
+
+  // C2. Relevant liquidity: nearest active pool above / below, latest sweep
+  if (price !== null) {
+    const pools = live.filter((o) => scope.has(o.timeframe) && typeof o.price === 'number' && typed(['bsl', 'ssl', 'eqh', 'eql'], o))
+    // Buy-side pools rest above price, sell-side pools below; a pool the live
+    // price has already passed is not presented as resting liquidity.
+    const above = pools.filter((o) => o.price > price && typed(['bsl', 'eqh'], o)).sort((a, b) => a.price - b.price)[0]
+    const below = pools.filter((o) => o.price < price && typed(['ssl', 'eql'], o)).sort((a, b) => b.price - a.price)[0]
+    const sweep = overlays.filter((o) => scope.has(o.timeframe) && typed(['sweep'], o))
+      .sort((a, b) => when(b).localeCompare(when(a)))[0]
+    const tag = (o) => `${typeOf(o).toUpperCase()} ${fmt(o.price)} ${o.timeframe}`
+    const parts = [above ? `${tag(above)} above` : null, below ? `${tag(below)} below` : null,
+      sweep ? `last sweep ${sweep.name} ${sweep.timeframe}` : null].filter(Boolean)
+    lines.push({
+      key: 'liquidity', label: 'Liquidity', text: parts.join(' · ') || 'no active pool near price',
+      ids: [above, below, sweep].filter(Boolean).map((o) => o.id), tone: null,
+    })
+
+    // C3. Area price is in / approaching (nearest active zone)
+    const zones = live.filter((o) => scope.has(o.timeframe) && typeof lo(o) === 'number' && typed(['fvg', 'ob', 'supply', 'demand'], o))
+    const dist = (o) => (price < lo(o) ? lo(o) - price : price > hi(o) ? price - hi(o) : 0)
+    const zone = zones.sort((a, b) => dist(a) - dist(b) || tfRankLocal(b.timeframe) - tfRankLocal(a.timeframe))[0]
+    lines.push({
+      key: 'area', label: 'Key area',
+      text: zone
+        ? `price ${dist(zone) === 0 ? 'inside' : price < lo(zone) ? 'below' : 'above'} ${zone.timeframe} ${zone.name} ${fmt(lo(zone))}–${fmt(hi(zone))}`
+        : `no active FVG/OB on ${[...scope].join('/')}`,
+      ids: zone ? [zone.id] : [], tone: zone ? normDirection(zone.color) : null,
+    })
+  }
+
+  // C4. Confirmation needed / invalidation (selected scenario, as written by the engine)
+  const gate = overlays.find((o) => o.layer === 'trade_plan' && o.meta?.blockers?.length)
+  if (scenario) {
+    lines.push({
+      key: 'confirm', label: 'Needs',
+      text: `${words(scenario.trigger) || 'no trigger defined'}${typeof scenario.trigger_reference === 'number' ? '' : ' (no trigger price)'}`,
+      ids: gate ? [gate.id] : [], tone: normDirection(scenario.direction),
+      detail: [`scenario: ${words(scenario.name)}`, ...(gate?.meta?.blockers || [])].join('\n'),
+    })
+    lines.push({
+      key: 'invalidation', label: 'Invalidation',
+      text: typeof scenario.invalidation_reference === 'number'
+        ? `${fmt(scenario.invalidation_reference)} · ${words(scenario.invalidation)}`
+        : words(scenario.invalidation) || 'not provided by the engine',
+      ids: [], tone: null,
+    })
+  }
+
+  return { direction, headline, state, stateText, conflicts, trends, groups, alignment, alignmentText, lines }
+}
+
+function tfRankLocal(t) {
+  return ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1'].indexOf(t)
 }

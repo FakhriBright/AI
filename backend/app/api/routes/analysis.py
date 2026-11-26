@@ -127,25 +127,17 @@ async def analyze_market(
     )
 
     try:
-        try:
-            ai_service = AIReasoningService(provider=get_ai_provider_for_user(db, current_user))
-        except Exception:
-            logger.exception("AI provider initialization failed; serving deterministic analysis")
-            ai_service = None
-
+        # Deterministic only: no AI provider is created and no AI call is made
+        # (auto-refresh, symbol switch and every dashboard load go through
+        # here). AI runs only in the chat endpoint below, on a user message.
         result = await analyze_symbol(
             symbol=symbol,
             provider=provider,
-            ai_service=ai_service,
+            ai_service=None,
             risk_percent=risk_percent,
             count=count,
+            run_ai=False,
         )
-
-        if result.ai_response.raw and result.ai_response.raw.get("status") == "error":
-            logger.error(
-                "AI provider returned an error; serving deterministic analysis: %s",
-                result.ai_response.analysis,
-            )
 
         return _build_response(result)
 
@@ -159,7 +151,7 @@ async def analyze_market(
         logger.exception("Unexpected error during analyze_market")
         raise HTTPException(
             status_code=502,
-            detail="AI analysis temporarily unavailable",
+            detail="Market analysis temporarily unavailable",
         ) from exc
 
 
@@ -173,6 +165,34 @@ def _provider_http_status(exc: Exception) -> int | None:
     if status_code in {413, 429, 500, 502, 503, 504}:
         return status_code
     return None
+
+
+def _chat_selection_context(det: Any) -> dict[str, Any]:
+    """Selected scenario + confirmation of the SAME deterministic snapshot the
+    dashboard shows (chart, Trade Plan), so the AI explains engine values
+    instead of inferring its own setup."""
+    sc = det.selected_scenario
+    conf = det.confirmation
+    return {
+        "selected_scenario": {
+            "name": sc.name,
+            "direction": sc.direction,
+            "status": sc.status,
+            "trigger": sc.trigger,
+            "trigger_reference": sc.trigger_reference,
+            "trigger_confirmed": sc.trigger_confirmed,
+            "breakout_status": sc.breakout_status,
+            "invalidation": sc.invalidation,
+            "invalidation_reference": sc.invalidation_reference,
+            "conviction": sc.conviction,
+        },
+        "confirmation": {
+            "confirmed": conf.confirmed,
+            "confirmation_type": conf.confirmation_type,
+            "entry_price": conf.entry_price,
+            "reasons": list(conf.reasons)[:4],
+        },
+    }
 
 
 @router.post(
@@ -217,6 +237,7 @@ async def chat_analysis(
             det.ai_context,
             capped_message,
         )
+        context.update(_chat_selection_context(det))
         context = _json_safe(context)
     except Exception as exc:
         known = market_data_error_detail(exc)

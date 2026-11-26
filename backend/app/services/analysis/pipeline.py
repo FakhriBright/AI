@@ -199,6 +199,45 @@ def _provider_identity(ai_service: AIReasoningService) -> tuple[str, str]:
     return str(provider_name), str(model)
 
 
+def _build_stop_plan(
+    confirmation: ConfirmationResult,
+    scenario: Scenario,
+) -> tuple[StopPlan | None, str | None]:
+    """Stop only at a valid invalidation reference, never estimated.
+
+    Bearish confirmations carry it as confirmation.stop_price; bullish ones use
+    the scenario's invalidation_reference. A missing or wrong-side reference
+    returns (None, reason) so the plan stays at "confirmed_needs_stop" instead
+    of failing the whole analysis (previously a 502, e.g. a bullish scalp
+    scenario without invalidation_reference).
+    """
+    if not confirmation.confirmed or confirmation.entry_price is None:
+        return None, None
+    invalidation = (
+        confirmation.stop_price
+        if confirmation.stop_price is not None
+        else scenario.invalidation_reference
+    )
+    if invalidation is None:
+        return None, "No invalidation reference for the confirmed scenario; stop not placed"
+    try:
+        return calculate_stop(
+            StopRequest(
+                direction=scenario.direction,
+                entry_price=confirmation.entry_price,
+                trigger_reference=(
+                    scenario.trigger_reference
+                    if scenario.trigger_reference is not None
+                    else invalidation
+                ),
+                invalidation_reference=invalidation,
+                atr_reference=scenario.atr_reference,
+            )
+        ), None
+    except ValueError as exc:
+        return None, f"Stop not placed: {exc}"
+
+
 async def _build_deterministic(
     symbol: str,
     provider: MarketDataProvider,
@@ -263,45 +302,16 @@ async def _build_deterministic(
     )
     selected_scenario.trigger_confirmed = confirmation.confirmed
 
-    stop_plan: StopPlan | None = None
+    stop_plan, stop_error = _build_stop_plan(confirmation, selected_scenario)
 
-    if (
-        confirmation.confirmed
-        and confirmation.entry_price is not None
-        and confirmation.stop_price is None
-        and selected_scenario.direction == "bullish"
-    ):
-        if selected_scenario.trigger_reference is not None:
-            stop_plan = calculate_stop(
-                StopRequest(
-                    direction=selected_scenario.direction,
-                    entry_price=confirmation.entry_price,
-                    trigger_reference=selected_scenario.trigger_reference,
-                    invalidation_reference=(
-                        selected_scenario.invalidation_reference
-                    ),
-                    atr_reference=selected_scenario.atr_reference,
-                )
-            )
-
-    elif (
-        confirmation.confirmed
-        and confirmation.entry_price is not None
-        and confirmation.stop_price is not None
-    ):
-        stop_plan = calculate_stop(
-            StopRequest(
-                direction=selected_scenario.direction,
-                entry_price=confirmation.entry_price,
-                trigger_reference=(
-                    selected_scenario.trigger_reference
-                    if selected_scenario.trigger_reference is not None
-                    else confirmation.stop_price
-                ),
-                invalidation_reference=confirmation.stop_price,
-                atr_reference=selected_scenario.atr_reference,
-            )
-        )
+    # Broker price precision (MT5 symbol digits) for every plan level.
+    price_digits: int | None = None
+    try:
+        digits = (await provider.symbol_info(symbol)).digits
+        if isinstance(digits, int) and not isinstance(digits, bool) and 0 <= digits <= 10:
+            price_digits = digits
+    except Exception:
+        price_digits = None
 
     risk_plan: RiskPlan | None = None
     risk_error: str | None = None
@@ -347,6 +357,8 @@ async def _build_deterministic(
         context=context,
         levels=levels,
         risk_error=risk_error,
+        stop_error=stop_error,
+        price_digits=price_digits,
     )
 
     ai_context = build_ai_context(

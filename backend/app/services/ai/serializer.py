@@ -224,6 +224,7 @@ def _compact_trade_plan(
         "scenario_name": trade_plan.scenario_name,
         "direction": trade_plan.direction,
         "status": trade_plan.status,
+        "action": getattr(trade_plan, "action", None),
         "entry_price": trade_plan.entry_price,
         "stop_price": trade_plan.stop_price,
         "stop_distance": trade_plan.stop_distance,

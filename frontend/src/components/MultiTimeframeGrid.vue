@@ -9,7 +9,7 @@ const props = defineProps({
   },
   symbol: {
     type: String,
-    default: 'EURUSDm',
+    default: 'XAUUSDm',
   },
 })
 

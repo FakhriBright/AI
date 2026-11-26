@@ -213,7 +213,8 @@ async def main():
     test_cache_reuse_does_not_call_provider_twice()
     print("cache reuse: PASS")
 
-    await test_reasoning_chat_is_single_provider_call()
+    # Sync test that owns its own event loop: run it outside main()'s loop.
+    await asyncio.to_thread(test_reasoning_chat_is_single_provider_call)
     print("chat single AI call: PASS")
 
     test_chat_context_selection_is_deterministic()

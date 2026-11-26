@@ -73,6 +73,42 @@ class TradePlan:
     reasons: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
+    # BUY / SELL only when confirmation, a valid stop and a valid target all
+    # exist; otherwise WAIT. Position sizing does not change the action.
+    action: str = "WAIT"
+    # Scenario references the plan is built from (engine values, not estimates).
+    trigger_price: float | None = None
+    invalidation_price: float | None = None
+    # Broker precision (MT5 symbol digits) applied to every price above.
+    price_digits: int | None = None
+
+
+def _round_price(value: float | None, digits: int | None) -> float | None:
+    if value is None or digits is None:
+        return value
+    return round(value, digits)
+
+
+def _select_target(
+    direction: str,
+    entry_price: float,
+    levels: KeyLevels | None,
+) -> float | None:
+    """Nearest key level beyond entry in the trade direction (engine levels only)."""
+    if levels is None:
+        return None
+    # Targets must lie beyond entry in the trade direction. The old code
+    # always picked index 0 (the nearest level to current price), which can
+    # be the very trigger level or even the wrong side of an already-moved
+    # entry, yielding misleading/undefined reward geometry.
+    if direction == "bullish":
+        valid = [zone.price for zone in levels.resistances if zone.price > entry_price]
+        return min(valid) if valid else None
+    if direction == "bearish":
+        valid = [zone.price for zone in levels.supports if zone.price < entry_price]
+        return max(valid) if valid else None
+    return None
+
 
 def _build_technical_context(
     context: MultiTimeframeContext,
@@ -148,6 +184,52 @@ def build_trade_plan(
     context: MultiTimeframeContext | None = None,
     levels: KeyLevels | None = None,
     risk_error: str | None = None,
+    stop_error: str | None = None,
+    price_digits: int | None = None,
+) -> TradePlan:
+    plan = _build_trade_plan(
+        symbol=symbol,
+        scenario=scenario,
+        confirmation=confirmation,
+        stop_plan=stop_plan,
+        risk_plan=risk_plan,
+        bias=bias,
+        context=context,
+        levels=levels,
+        risk_error=risk_error,
+        stop_error=stop_error,
+        digits=price_digits,
+    )
+    plan.trigger_price = _round_price(scenario.trigger_reference, price_digits)
+    plan.invalidation_price = _round_price(scenario.invalidation_reference, price_digits)
+    plan.price_digits = price_digits
+    complete = (
+        plan.entry_price is not None
+        and plan.stop_price is not None
+        and plan.target_price is not None
+        and plan.rr_ratio is not None
+    )
+    if complete and plan.direction == "bullish":
+        plan.action = "BUY"
+    elif complete and plan.direction == "bearish":
+        plan.action = "SELL"
+    else:
+        plan.action = "WAIT"
+    return plan
+
+
+def _build_trade_plan(
+    symbol: str,
+    scenario: Scenario,
+    confirmation: ConfirmationResult,
+    stop_plan: StopPlan | None,
+    risk_plan: RiskPlan | None,
+    bias: MarketBias | None,
+    context: MultiTimeframeContext | None,
+    levels: KeyLevels | None,
+    risk_error: str | None,
+    stop_error: str | None,
+    digits: int | None,
 ) -> TradePlan:
 
     reasons = list(confirmation.reasons)
@@ -211,13 +293,15 @@ def build_trade_plan(
 
     if stop_plan is None:
         warnings.append("Confirmed scenario has no stop plan")
+        if stop_error:
+            warnings.append(stop_error)
 
         return TradePlan(
             symbol=symbol,
             scenario_name=scenario.name,
             direction=scenario.direction,
             status="confirmed_needs_stop",
-            entry_price=confirmation.entry_price,
+            entry_price=_round_price(confirmation.entry_price, digits),
             confirmation_type=confirmation.confirmation_type,
             market_bias=market_bias,
             htf_bias=htf_bias,
@@ -231,6 +315,54 @@ def build_trade_plan(
         )
 
     # --------------------------------------------------------
+    # Stop exists: prices at broker precision, target / RR from engine levels
+    # --------------------------------------------------------
+
+    entry_price = _round_price(stop_plan.entry_price, digits)
+    stop_price = _round_price(stop_plan.stop_price, digits)
+    stop_distance = _round_price(stop_plan.stop_distance, digits)
+
+    target_price = _round_price(
+        _select_target(scenario.direction, stop_plan.entry_price, levels),
+        digits,
+    )
+    rr_ratio: float | None = None
+    if target_price is not None:
+        try:
+            rr_ratio = round(
+                calculate_rr(
+                    direction=scenario.direction,
+                    entry_price=entry_price,
+                    stop_price=stop_price,
+                    target_price=target_price,
+                ),
+                2,
+            )
+        except ValueError:
+            target_price = None
+            rr_ratio = None
+
+    common = dict(
+        symbol=symbol,
+        scenario_name=scenario.name,
+        direction=scenario.direction,
+        entry_price=entry_price,
+        stop_price=stop_price,
+        stop_distance=stop_distance,
+        target_price=target_price,
+        rr_ratio=rr_ratio,
+        confirmation_type=confirmation.confirmation_type,
+        stop_method=stop_plan.method,
+        market_bias=market_bias,
+        htf_bias=htf_bias,
+        intraday_bias=intraday_bias,
+        entry_bias=entry_bias,
+        conflicts=conflicts,
+        technical_context=technical_context,
+        levels_context=levels_context,
+    )
+
+    # --------------------------------------------------------
     # Stop exists but risk calculation unavailable
     # --------------------------------------------------------
 
@@ -239,24 +371,12 @@ def build_trade_plan(
 
         if risk_error:
             warnings.append(f"Risk calculation error: {risk_error}")
+        if target_price is None:
+            warnings.append("No valid target beyond entry")
 
         return TradePlan(
-            symbol=symbol,
-            scenario_name=scenario.name,
-            direction=scenario.direction,
+            **common,
             status="confirmed_needs_risk",
-            entry_price=stop_plan.entry_price,
-            stop_price=stop_plan.stop_price,
-            stop_distance=stop_plan.stop_distance,
-            confirmation_type=confirmation.confirmation_type,
-            stop_method=stop_plan.method,
-            market_bias=market_bias,
-            htf_bias=htf_bias,
-            intraday_bias=intraday_bias,
-            entry_bias=entry_bias,
-            conflicts=conflicts,
-            technical_context=technical_context,
-            levels_context=levels_context,
             reasons=reasons + stop_plan.reasons,
             warnings=warnings,
         )
@@ -265,90 +385,22 @@ def build_trade_plan(
     # Complete trade plan
     # --------------------------------------------------------
 
-    target_price: float | None = None
-    rr_ratio: float | None = None
-
-    if stop_plan is not None and levels is not None:
-        # Targets must lie beyond entry in the trade direction. The old code
-        # always picked index 0 (the nearest level to current price), which can
-        # be the very trigger level or even the wrong side of an already-moved
-        # entry, yielding misleading/undefined reward geometry.
-        if scenario.direction == "bullish":
-            valid_targets = [
-                zone.price for zone in levels.resistances
-                if zone.price > stop_plan.entry_price
-            ]
-            target_price = min(valid_targets) if valid_targets else None
-        elif scenario.direction == "bearish":
-            valid_targets = [
-                zone.price for zone in levels.supports
-                if zone.price < stop_plan.entry_price
-            ]
-            target_price = max(valid_targets) if valid_targets else None
-
-        if target_price is not None:
-            try:
-                rr_ratio = calculate_rr(
-                    direction=scenario.direction,
-                    entry_price=stop_plan.entry_price,
-                    stop_price=stop_plan.stop_price,
-                    target_price=target_price,
-                )
-            except ValueError:
-                rr_ratio = None
-
     if target_price is None or rr_ratio is None:
         warnings.append("No valid target beyond entry; trade plan is not actionable")
         return TradePlan(
-            symbol=symbol,
-            scenario_name=scenario.name,
-            direction=scenario.direction,
+            **common,
             status="confirmed_needs_target",
-            entry_price=stop_plan.entry_price,
-            stop_price=stop_plan.stop_price,
-            stop_distance=stop_plan.stop_distance,
-            confirmation_type=confirmation.confirmation_type,
-            stop_method=stop_plan.method,
-            market_bias=market_bias,
-            htf_bias=htf_bias,
-            intraday_bias=intraday_bias,
-            entry_bias=entry_bias,
-            conflicts=conflicts,
-            technical_context=technical_context,
-            levels_context=levels_context,
             reasons=reasons + stop_plan.reasons,
             warnings=warnings,
         )
 
     return TradePlan(
-        symbol=symbol,
-        scenario_name=scenario.name,
-        direction=scenario.direction,
+        **common,
         status="ready_for_manual_review",
-
-        entry_price=stop_plan.entry_price,
-        stop_price=stop_plan.stop_price,
-        stop_distance=stop_plan.stop_distance,
-        target_price=target_price,
-        rr_ratio=rr_ratio,
-
         risk_percent=risk_plan.risk_percent,
         risk_amount=risk_plan.risk_amount,
         volume=risk_plan.volume,
         estimated_loss=risk_plan.estimated_loss,
-
-        confirmation_type=confirmation.confirmation_type,
-        stop_method=stop_plan.method,
-
-        market_bias=market_bias,
-        htf_bias=htf_bias,
-        intraday_bias=intraday_bias,
-        entry_bias=entry_bias,
-        conflicts=conflicts,
-
-        technical_context=technical_context,
-        levels_context=levels_context,
-
         reasons=reasons,
         warnings=warnings,
     )

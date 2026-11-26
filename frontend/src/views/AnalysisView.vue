@@ -7,10 +7,9 @@ import KeyLevelsPanel from '../components/KeyLevelsPanel.vue'
 import MarketStructurePanel from '../components/MarketStructurePanel.vue'
 import MultiTimeframeGrid from '../components/MultiTimeframeGrid.vue'
 import ScenarioPanel from '../components/ScenarioPanel.vue'
-import AIReasoningPanel from '../components/AIReasoningPanel.vue'
 
 const props = defineProps({
-  symbol: { type: String, default: 'EURUSDm' },
+  symbol: { type: String, default: 'XAUUSDm' },
   analysisData: { type: Object, default: null },
   liveTick: { type: Object, default: null },
   isBridgeOffline: { type: Boolean, default: false },
@@ -54,6 +53,7 @@ const emit = defineEmits(['retry'])
       :trade-plan="analysisData?.trade_plan"
       :market-bias="analysisData?.market_bias"
       :scenarios="analysisData?.scenarios"
+      :multi-timeframe="analysisData?.multi_timeframe"
     />
 
     <!-- Single Coherent Trade Plan Module -->
@@ -86,17 +86,14 @@ const emit = defineEmits(['retry'])
       :symbol="symbol"
     />
 
-    <!-- Progressive Disclosure Details Accordion -->
+    <!-- Progressive Disclosure Details Accordion (deterministic engine scenarios) -->
     <details class="details-accordion">
       <summary>View Technical Details & Scenarios</summary>
       <div class="card-body" style="display: flex; flex-direction: column; gap: 16px;">
         <ScenarioPanel
+          :scenarios-data="analysisData?.scenarios"
           :selected-scenario="analysisData?.selected_scenario"
-          :scenario-analysis="analysisData?.scenario_analysis"
-          :symbol="symbol"
-        />
-        <AIReasoningPanel
-          :ai-data="analysisData?.ai"
+          :confirmation="analysisData?.confirmation"
           :symbol="symbol"
         />
       </div>

@@ -40,6 +40,7 @@ import {
   shortScenarioName,
   tfProfile,
   buildConfluence,
+  buildMarketRead,
   confluenceLabel,
   layoutLabelsCached,
   lifecycleStyle,
@@ -48,7 +49,7 @@ import {
 const props = defineProps({
   symbol: {
     type: String,
-    default: 'EURUSDm',
+    default: 'XAUUSDm',
   },
   keyLevels: {
     type: Object,
@@ -87,6 +88,11 @@ const props = defineProps({
     default: null,
   },
   scenarios: {
+    type: Object,
+    default: null,
+  },
+  // Per-timeframe trend/structure from the same GET /analysis response.
+  multiTimeframe: {
     type: Object,
     default: null,
   },
@@ -209,7 +215,12 @@ const isStale = computed(() => {
   const bar = times.length > 1 ? times[times.length - 1] - times[times.length - 2] : 0
   return latest - analysisT > STALE_AFTER_MS + bar
 })
-const offTimeframeHighlights = computed(() => highlightedTimeframes(activeTf.value))
+// Highlighted objects of other timeframes that are NOT drawn on this one
+// (a higher-timeframe reference already drawn here needs no hint).
+const offTimeframeHighlights = computed(() => {
+  const drawn = new Set(visibleOverlays(activeTf.value, layerPrefs.value, visibleRange.value).map((v) => v.overlay.id))
+  return chartStore.highlightIds.every((id) => drawn.has(id)) ? [] : highlightedTimeframes(activeTf.value)
+})
 const hasAiDrawings = computed(
   () => Object.keys(chartStore.annotations).length > 0 || chartStore.highlightIds.length > 0
 )
@@ -271,6 +282,27 @@ function togglePanel(name) {
 
 function handleHighlightLatest() {
   highlightLatest(activeTf.value)
+}
+
+// Market read: concise summary of the existing analysis for this timeframe
+// (engine values only; recomputed locally, never a request).
+const readOpen = ref(true)
+const marketRead = computed(() => buildMarketRead({
+  tf: activeTf.value,
+  marketBias: props.marketBias,
+  mtf: props.multiTimeframe,
+  overlays: Object.values(chartStore.engine).concat(Object.values(chartStore.keyZones)),
+  typeOf: overlayType,
+  currentPrice: liveBid.value ?? props.keyLevels?.current_price ?? null,
+  scenario: props.selectedScenario,
+  tradePlan: props.tradePlan,
+  stale: isStale.value,
+  fmt: fmtPrice,
+}))
+
+function highlightRead(line) {
+  if (!line.ids?.length) return
+  chartStore.highlightIds = [...line.ids]
 }
 
 // ---------------------------------------------------------------------------
@@ -432,6 +464,22 @@ const seriesBehind = computed(() => {
 let lastSeriesReload = 0
 watch(seriesBehind, (behind) => {
   if (behind && !isLoading.value && Date.now() - lastSeriesReload > 30000) {
+    lastSeriesReload = Date.now()
+    fetchCandles()
+  }
+})
+
+// New candle: once the live tick time passes the end of the newest loaded bar,
+// a new bar has opened -> reload the series (market data only, never AI;
+// throttled; zoom/pan window kept).
+const newBarOpened = computed(() => {
+  const tickT = Date.parse(props.liveTick?.time_utc || '')
+  const times = candles.value.slice(-2).map((c) => Date.parse(c.time_utc))
+  if (!Number.isFinite(tickT) || times.length < 2 || times.some((x) => !Number.isFinite(x))) return false
+  return tickT >= times[1] + (times[1] - times[0])
+})
+watch(() => props.liveTick?.time_utc, () => {
+  if (newBarOpened.value && !isLoading.value && Date.now() - lastSeriesReload > 15000) {
     lastSeriesReload = Date.now()
     fetchCandles()
   }
@@ -1235,6 +1283,15 @@ function drawOverlay(geom, item, highlighted) {
       }
       ctx.setLineDash([])
       ctx.beginPath(); ctx.arc(xT, yT, strong ? 4 : 3, 0, Math.PI * 2); ctx.fill()
+      // Potential direction AFTER the trigger: a hollow chevron next to the node
+      // (a symbol, not a path); none for a mixed/undirected scenario.
+      if (o.color === 'bullish' || o.color === 'bearish') {
+        const cx = xT + (strong ? 11 : 9)
+        const s = strong ? 4.5 : 3.5
+        ctx.beginPath()
+        ctx.moveTo(cx - s, yT - dir * s * 0.6); ctx.lineTo(cx, yT + dir * s * 0.9); ctx.lineTo(cx + s, yT - dir * s * 0.6)
+        ctx.stroke()
+      }
 
       placeLabel(geom, scenarioBadge(o), xT - 8, yT + (dir > 0 ? -10 : 18), {
         color, tag: strong, priority: strong ? 3 : 1, key: o.id, ids,
@@ -1860,8 +1917,36 @@ onUnmounted(() => {
     <div v-if="isStale || offTimeframeHighlights.length" class="overlay-notes text-xs">
       <span v-if="isStale" class="badge badge-warning badge-sm">STALE · analysis older than 5 min, drawings faded</span>
       <span v-if="offTimeframeHighlights.length" class="text-muted">
-        AI highlighted objects on {{ offTimeframeHighlights.join(', ') }} — switch timeframe to see them.
+        Highlighted objects on {{ offTimeframeHighlights.join(', ') }} are not drawn here — switch timeframe to see them.
       </span>
+    </div>
+
+    <!-- Market read: existing engine direction + what matters now (no request) -->
+    <div v-if="marketRead" class="market-read text-xs">
+      <div class="read-head">
+        <span class="read-dir" :class="`dir-${marketRead.direction}`" title="market_bias.overall from the analysis engine">{{ marketRead.headline }}</span>
+        <span class="read-state" :class="`state-${marketRead.state}`" title="Trade plan status (engine); a setup is never shown as ready before the engine says so">{{ marketRead.stateText }}</span>
+        <span class="read-tfs" title="Trend per timeframe (multi_timeframe[tf].trend)">
+          <span v-for="t in marketRead.trends" :key="t.tf" class="read-tf" :class="[`dir-${t.trend}`, { active: t.active }]">
+            {{ t.tf }} {{ t.trend === 'bullish' ? '▲' : t.trend === 'bearish' ? '▼' : '◆' }}
+          </span>
+        </span>
+        <span class="read-align" :class="`align-${marketRead.alignment}`">{{ marketRead.alignmentText }}</span>
+        <button class="read-toggle" :title="readOpen ? 'Hide details' : 'Show details'" @click="readOpen = !readOpen">{{ readOpen ? '▴' : '▾' }}</button>
+      </div>
+      <div v-if="readOpen" class="read-lines">
+        <span
+          v-for="line in marketRead.lines"
+          :key="line.key"
+          class="read-line"
+          :class="{ linked: line.ids?.length }"
+          :title="(line.detail ? line.detail + '\n' : '') + (line.ids?.length ? 'Click: highlight on chart' : '')"
+          @click="highlightRead(line)"
+        >
+          <span class="read-label">{{ line.label }}</span>
+          <span :class="line.tone ? `dir-${line.tone}` : ''">{{ line.text }}</span>
+        </span>
+      </div>
     </div>
 
     <!-- Canvas Container -->
@@ -1907,6 +1992,74 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.market-read {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border-main);
+}
+
+.read-head,
+.read-lines {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.read-dir,
+.read-state {
+  padding: 1px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid currentColor;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.read-state { color: #E0A84A; }
+.read-state.state-ready_for_manual_review { color: #5FB7D9; }
+.read-state.state-stale { color: #8B93A7; }
+
+.dir-bullish { color: #F5F5F7; }
+.dir-bearish { color: #9C92E6; }
+.dir-mixed { color: #E0A84A; }
+.dir-neutral { color: #8B93A7; }
+
+.read-tfs { display: inline-flex; gap: 4px; }
+
+.read-tf {
+  padding: 0 5px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono, monospace);
+}
+
+.read-tf.active { border-color: var(--accent-primary); }
+
+.read-align { color: var(--text-muted); }
+.read-align.align-conflict { color: #E0A84A; }
+
+.read-toggle {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.read-line { color: var(--text-muted); }
+.read-line.linked { cursor: pointer; }
+.read-line.linked:hover { color: var(--text-main); }
+
+.read-label {
+  margin-right: 4px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+}
+
 .overlay-bar {
   display: flex;
   flex-wrap: wrap;

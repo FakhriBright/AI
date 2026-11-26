@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from 'vue'
-import { formatPrice, getBiasBadgeClass } from '../utils/formatters'
+import { engineText, formatPrice, getBiasBadgeClass } from '../utils/formatters'
 import { chartStore } from '../utils/chartOverlays'
 
 const props = defineProps({
@@ -14,7 +14,7 @@ const props = defineProps({
   },
   symbol: {
     type: String,
-    default: 'EURUSDm',
+    default: 'XAUUSDm',
   },
   marketBias: {
     type: Object,
@@ -36,7 +36,7 @@ const plan = computed(() => props.tradePlan || {})
 const STATUS_VIEW = {
   waiting: { label: 'WAITING', cls: 'badge-warning', note: 'No trigger confirmed yet.' },
   confirmed_needs_stop: { label: 'SETUP FORMING', cls: 'badge-info', note: 'Trigger confirmed, but no valid stop yet.' },
-  confirmed_needs_risk: { label: 'SETUP FORMING', cls: 'badge-info', note: 'Trigger confirmed, but risk settings are missing.' },
+  confirmed_needs_risk: { label: 'SETUP FORMING', cls: 'badge-info', note: 'Trigger confirmed; entry/stop/target from the engine, but position size needs risk settings / account data.' },
   confirmed_needs_target: { label: 'SETUP FORMING', cls: 'badge-info', note: 'Trigger confirmed, but no valid target / RR.' },
   ready_for_manual_review: { label: 'CONFIRMED', cls: 'badge-bullish', note: 'Ready for manual review. Execution stays manual.' },
 }
@@ -49,6 +49,10 @@ const statusView = computed(() => {
 
 const bias = computed(() => props.marketBias?.overall || plan.value.market_bias || 'neutral')
 const direction = computed(() => plan.value.direction || null)
+// Engine decision (analysis/trade_plan.py): BUY / SELL only with confirmation,
+// a valid stop and a valid target; otherwise WAIT. Never derived here.
+const action = computed(() => plan.value.action || (plan.value.status ? 'WAIT' : null))
+const ACTION_CLS = { BUY: 'badge-bullish', SELL: 'badge-bearish', WAIT: 'badge-warning' }
 
 function price(value) {
   return value !== null && value !== undefined ? formatPrice(value, props.symbol) : null
@@ -60,17 +64,17 @@ const values = computed(() => [
   { label: 'Take Profit', value: price(plan.value.target_price ?? plan.value.take_profit), cls: 'text-green' },
   {
     label: 'Risk / Reward',
-    value: plan.value.rr_ratio !== null && plan.value.rr_ratio !== undefined ? `1:${plan.value.rr_ratio}` : null,
+    value: plan.value.rr_ratio !== null && plan.value.rr_ratio !== undefined ? `1:${Number(plan.value.rr_ratio).toFixed(2)}` : null,
     cls: 'text-green',
   },
 ])
 const missingValues = computed(() => values.value.some((v) => !v.value))
 
 const scenario = computed(() => props.selectedScenario || {})
-const humanize = (s) => String(s || '').replace(/_/g, ' ')
+const humanize = (s) => engineText(s, props.symbol)
 
 const trigger = computed(() => {
-  const ref = price(scenario.value.trigger_reference)
+  const ref = price(plan.value.trigger_price ?? scenario.value.trigger_reference)
   return {
     text: scenario.value.trigger ? humanize(scenario.value.trigger) : null,
     ref,
@@ -80,7 +84,7 @@ const trigger = computed(() => {
 
 const invalidation = computed(() => ({
   text: scenario.value.invalidation ? humanize(scenario.value.invalidation) : null,
-  ref: price(scenario.value.invalidation_reference),
+  ref: price(plan.value.invalidation_price ?? scenario.value.invalidation_reference),
 }))
 
 const confirmationView = computed(() => {
@@ -112,6 +116,7 @@ const reasoning = computed(() => {
       <span class="card-title">TRADE PLAN</span>
       <span class="tp-head-right">
         <span v-if="plan.scenario_name" class="text-xs text-muted">{{ humanize(plan.scenario_name) }}</span>
+        <span v-if="action" class="badge" :class="ACTION_CLS[action] || 'badge-neutral'" title="Engine decision: BUY/SELL only with confirmation, valid stop and valid target">{{ action }}</span>
         <span class="badge" :class="statusView.cls">{{ statusView.label }}</span>
       </span>
     </div>

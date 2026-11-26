@@ -3,8 +3,8 @@ import { computed } from 'vue'
 import { formatPrice, getBiasBadgeClass } from '../utils/formatters'
 
 const props = defineProps({
-  symbol: { type: String, default: 'EURUSDm' },
-  symbols: { type: Array, default: () => ['EURUSDm', 'XAUUSDm'] },
+  symbol: { type: String, default: 'XAUUSDm' },
+  symbols: { type: Array, default: () => ['XAUUSDm', 'EURUSDm'] },
   analysisData: { type: Object, default: null },
   liveTick: { type: Object, default: null },
   bridgeHealth: { type: Object, default: () => ({}) },

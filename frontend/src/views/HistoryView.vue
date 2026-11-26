@@ -3,7 +3,7 @@ import { ref, computed } from 'vue'
 import { formatDateTimeUtc, getBiasBadgeClass, getStatusBadgeClass } from '../utils/formatters'
 
 const props = defineProps({
-  symbol: { type: String, default: 'EURUSDm' },
+  symbol: { type: String, default: 'XAUUSDm' },
   analysisData: { type: Object, default: null },
 })
 

@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import { getBiasBadgeClass, getStatusBadgeClass, formatPrice } from '../utils/formatters'
 
 const props = defineProps({
-  symbol: { type: String, default: 'EURUSDm' },
+  symbol: { type: String, default: 'XAUUSDm' },
   marketBias: { type: Object, default: null },
   selectedScenario: { type: Object, default: null },
   confirmation: { type: Object, default: null },

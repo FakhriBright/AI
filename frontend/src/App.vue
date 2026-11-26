@@ -11,6 +11,7 @@ import {
 } from './services/api'
 
 import { getInitialTheme, applyTheme, toggleThemeCurrent } from './utils/themeManager'
+import { setSymbolDigits } from './utils/formatters'
 import NavigationSidebar from './components/NavigationSidebar.vue'
 import TopBar from './components/TopBar.vue'
 import AIChatAssistant from './components/AIChatAssistant.vue'
@@ -66,8 +67,30 @@ function onMouseUp() {
 }
 
 // Data State
-const symbols = ref(['EURUSDm', 'XAUUSDm'])
-const selectedSymbol = ref('EURUSDm')
+// Dashboard symbol: the trader's saved choice, otherwise XAUUSDm (broker name).
+// The preference is written only when the trader picks a symbol, so the
+// default never overwrites a saved choice.
+const DEFAULT_SYMBOL = 'XAUUSDm'
+const SYMBOL_PREF_KEY = 'fr_quantterminal_symbol'
+
+function loadSymbolPref() {
+  try {
+    return localStorage.getItem(SYMBOL_PREF_KEY) || null
+  } catch {
+    return null
+  }
+}
+
+function saveSymbolPref(symbol) {
+  try {
+    localStorage.setItem(SYMBOL_PREF_KEY, symbol)
+  } catch {
+    // Storage unavailable (private mode): selection still works for this session.
+  }
+}
+
+const symbols = ref(['XAUUSDm', 'EURUSDm'])
+const selectedSymbol = ref(loadSymbolPref() || DEFAULT_SYMBOL)
 const analysisData = ref(null)
 const isAnalysisLoading = ref(false)
 const analysisError = ref('')
@@ -120,6 +143,12 @@ async function fetchSymbols() {
     const res = await getMarketSymbols()
     if (res?.symbols && Array.isArray(res.symbols) && res.symbols.length) {
       symbols.value = res.symbols.slice()
+      // A symbol the broker does not offer (e.g. an old saved choice) falls back
+      // to the default, then to the broker's first symbol. The saved
+      // preference itself is left untouched.
+      if (!symbols.value.includes(selectedSymbol.value)) {
+        selectedSymbol.value = symbols.value.includes(DEFAULT_SYMBOL) ? DEFAULT_SYMBOL : symbols.value[0]
+      }
     }
   } catch (err) {
     console.warn('Could not load symbols:', err.message)
@@ -148,6 +177,7 @@ async function fetchAnalysis() {
     // Ignore stale response if user switched symbol while request was running.
     if (selectedSymbol.value !== targetSymbol) return
 
+    setSymbolDigits(data?.symbol || targetSymbol, data?.trade_plan?.price_digits)
     analysisData.value = data
   } catch (err) {
     if (selectedSymbol.value !== targetSymbol) return
@@ -186,6 +216,7 @@ async function fetchLiveTick() {
 function handleSelectSymbol(newSymbol) {
   if (selectedSymbol.value === newSymbol) return
   selectedSymbol.value = newSymbol
+  saveSymbolPref(newSymbol)
   analysisData.value = null
   liveTick.value = null
   fetchAnalysis()
@@ -196,9 +227,9 @@ async function handleAutoRefresh() {
   if (!loggedIn.value || isAnalysisLoading.value) return
   await checkBridgeHealth()
 
-  // Refresh the analysis snapshot on schedule. Live ticks are polled separately
-  // every 2s; the backend AI fingerprint cache avoids repeated token use when
-  // the structured market evidence has not materially changed.
+  // Refresh the deterministic analysis snapshot on schedule (chart, Trade Plan,
+  // key levels). GET /analysis never calls an AI provider; AI runs only when
+  // the trader sends a message in AI Analyst Chat. Live ticks: every 2s.
   await fetchAnalysis()
 }
 

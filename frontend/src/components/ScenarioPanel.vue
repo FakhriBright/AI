@@ -1,6 +1,7 @@
 <script setup>
 import { computed } from 'vue'
 import {
+  engineText,
   formatPrice,
   formatPips,
   formatNumber,
@@ -22,12 +23,15 @@ const props = defineProps({
   },
   symbol: {
     type: String,
-    default: 'EURUSDm',
+    default: 'XAUUSDm',
   },
 })
 
+// Engine candidates (analysis/scenario.py): scalp + intraday lists. Read-only.
 const scenariosList = computed(() => {
-  return props.scenariosData?.scenarios || []
+  const data = props.scenariosData || {}
+  const tag = (list, group) => (list || []).map((s) => ({ ...s, group }))
+  return [...tag(data.scalp_scenarios, 'scalp'), ...tag(data.intraday_scenarios, 'intraday')]
 })
 
 function isScenarioSelected(scenario) {
@@ -54,7 +58,11 @@ function getScenarioIcon(direction) {
         </svg>
         <h2 class="panel-title">SCENARIO EVALUATION ENGINE</h2>
       </div>
-      <span class="panel-subtitle">Probabilistic Market Conditional Paths</span>
+      <span class="panel-subtitle">Deterministic conditional scenarios · {{ scenariosList.length }} candidates</span>
+    </div>
+
+    <div v-if="!scenariosList.length" class="text-muted text-sm">
+      No scenario candidates in this analysis.
     </div>
 
     <!-- Scenarios Grid -->
@@ -81,7 +89,7 @@ function getScenarioIcon(direction) {
                 {{ scenario.name.replace(/_/g, ' ').toUpperCase() }}
               </h3>
               <span class="scenario-status-pill uppercase">
-                Status: {{ scenario.status }}
+                {{ scenario.group }} · Status: {{ scenario.status }}
               </span>
             </div>
           </div>
@@ -105,7 +113,7 @@ function getScenarioIcon(direction) {
               <span class="cond-name">TRIGGER LOGIC:</span>
             </div>
             <div class="cond-body">
-              <span class="cond-rule">{{ scenario.trigger.replace(/_/g, ' ') }}</span>
+              <span class="cond-rule">{{ engineText(scenario.trigger, symbol) }}</span>
               <div v-if="scenario.trigger_reference" class="cond-ref-wrap">
                 <span class="cond-ref-label">Trigger Level:</span>
                 <span class="font-mono font-bold">{{ formatPrice(scenario.trigger_reference, symbol) }}</span>
@@ -123,7 +131,7 @@ function getScenarioIcon(direction) {
               <span class="cond-name">INVALIDATION:</span>
             </div>
             <div class="cond-body">
-              <span class="cond-rule">{{ scenario.invalidation.replace(/_/g, ' ') }}</span>
+              <span class="cond-rule">{{ engineText(scenario.invalidation, symbol) }}</span>
               <div v-if="scenario.invalidation_reference" class="cond-ref-wrap">
                 <span class="cond-ref-label">Inval Level:</span>
                 <span class="font-mono font-bold">{{ formatPrice(scenario.invalidation_reference, symbol) }}</span>
@@ -173,3 +181,142 @@ function getScenarioIcon(direction) {
     </div>
   </div>
 </template>
+
+<style scoped>
+.panel-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.panel-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.panel-title {
+  margin: 0;
+  font-size: 13px;
+  letter-spacing: 0.06em;
+}
+
+.panel-subtitle {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.scenarios-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+}
+
+.scenario-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border-main);
+  border-radius: var(--radius-sm);
+}
+
+.scenario-active-card {
+  border-color: var(--accent-primary);
+}
+
+.scenario-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.scenario-title-group {
+  display: flex;
+  gap: 8px;
+}
+
+.scenario-name-text {
+  margin: 0;
+  font-size: 12px;
+}
+
+.scenario-status-pill {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.scenario-header-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.scenario-conditions-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.condition-row {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.cond-label-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cond-name,
+.rationale-heading {
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.cond-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.dot-cyan { background: #5FB7D9; }
+.dot-amber { background: #E0A84A; }
+.dot-green { background: var(--accent-primary); }
+
+.cond-ref-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+  margin-top: 2px;
+}
+
+.cond-ref-label {
+  color: var(--text-muted);
+}
+
+.confirm-status-row,
+.rationale-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.rationale-pill {
+  padding: 1px 6px;
+  border: 1px solid var(--border-main);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+</style>

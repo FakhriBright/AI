@@ -1301,6 +1301,7 @@ _PLAN_KEYS = (
     "scenario_name",
     "direction",
     "status",
+    "action",
     "entry_price",
     "stop_price",
     "target_price",

@@ -4,6 +4,27 @@
  * Returns "Unavailable" or "—" for missing values.
  */
 
+// Broker price precision per symbol (MT5 symbol digits, delivered by the
+// analysis engine as trade_plan.price_digits). Used before any heuristic.
+const SYMBOL_DIGITS = {}
+
+export function setSymbolDigits(symbol, digits) {
+  if (symbol && Number.isInteger(digits) && digits >= 0 && digits <= 10) {
+    SYMBOL_DIGITS[String(symbol).toUpperCase()] = digits
+  }
+}
+
+/**
+ * Engine condition text ("bounce_at_zone_1.0977549999999998") for display:
+ * underscores -> spaces, float artefacts -> the symbol's price digits.
+ * The engine value itself is not changed.
+ */
+export function engineText(text, symbol = '') {
+  return String(text || '')
+    .replace(/_/g, ' ')
+    .replace(/\d+\.\d{6,}/g, (m) => formatPrice(Number(m), symbol))
+}
+
 export function formatPrice(price, symbol = '') {
   if (price === null || price === undefined || isNaN(price)) {
     return 'Unavailable'
@@ -12,6 +33,9 @@ export function formatPrice(price, symbol = '') {
   const num = Number(price)
   const sym = (symbol || '').toUpperCase()
 
+  if (Number.isInteger(SYMBOL_DIGITS[sym])) {
+    return num.toFixed(SYMBOL_DIGITS[sym])
+  }
   if (sym.includes('XAU') || sym.includes('GOLD')) {
     return num.toFixed(2)
   }
