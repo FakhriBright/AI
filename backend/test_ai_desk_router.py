@@ -16,6 +16,7 @@ from app.services.ai.desk import (
     pattern_family,
     shrink_to_budget,
 )
+
 from app.services.ai.prompt import build_analysis_prompt
 from app.services.ai.reasoning import AIReasoningService
 from app.services.analysis.pipeline import analyze_symbol

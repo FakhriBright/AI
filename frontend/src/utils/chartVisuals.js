@@ -233,7 +233,8 @@ export function layoutLabels(requests, { reserved = [], bounds, offsets = [0, -1
   // Collapse overflow: nearby labels (same 14px band, 120px span) form a group.
   const groups = []
   for (const r of overflow) {
-    const g = groups.find((x) => Math.abs(x.y - r.y) <= 14 && Math.abs(x.x - r.x) <= 120)
+    // Wider clusters -> fewer "+N" chips; members stay listed on hover/click.
+    const g = groups.find((x) => Math.abs(x.y - r.y) <= 26 && Math.abs(x.x - r.x) <= 240)
     if (g) g.items.push(r)
     else groups.push({ x: r.x, y: r.y, items: [r] })
   }

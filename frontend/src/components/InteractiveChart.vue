@@ -71,6 +71,11 @@ const props = defineProps({
     type: Object,
     default: null,
   },
+  // Trade plan (existing data): its target is shown for the matching scenario only.
+  tradePlan: {
+    type: Object,
+    default: null,
+  },
   // Live tick (bid/ask) polled by the app every 2 s; the header shows the same bid.
   liveTick: {
     type: Object,
@@ -89,7 +94,7 @@ const props = defineProps({
 // Candles loaded per timeframe; the viewport shows a window of them.
 const CANDLE_COUNT = 300
 const DEFAULT_VISIBLE = 80
-const FUTURE_BARS = 8 // blank space for conditional scenario projections
+const FUTURE_BARS = 14 // conditional projection space after the last candle (schematic, no timing)
 
 // Chart workspace palette (mandatory). Bullish = soft white, bearish =
 // midnight blue violet on a dark navy canvas. #30265F is used for bodies and
@@ -398,14 +403,33 @@ function rebuildDerived() {
     currentPrice: props.keyLevels?.current_price,
     selectedName: props.selectedScenario?.name || null,
     stale: isStale.value,
+    tradePlan: props.tradePlan,
   })
 }
 
-watch(() => [props.marketBias, props.scenarios, props.selectedScenario, isStale.value], rebuildDerived)
+watch(() => [props.marketBias, props.scenarios, props.selectedScenario, props.tradePlan, isStale.value], rebuildDerived)
 watch(view, () => renderChart(), { deep: true })
 // Live tick (every 2 s): redraw so the BID marker follows the header price
 // (label layout is cached, only the marker moves).
 watch(liveBid, () => renderChart())
+
+// The candle series is loaded on timeframe change / new analysis. If the live
+// tick is more than two bars past the newest loaded candle (e.g. the bridge
+// returned a lagging series), reload it — market data only, throttled.
+const seriesBehind = computed(() => {
+  const tickT = Date.parse(props.liveTick?.time_utc || '')
+  const times = candles.value.map((c) => Date.parse(c.time_utc)).filter(Number.isFinite)
+  if (!Number.isFinite(tickT) || times.length < 2 || liveBid.value === null) return false
+  const bar = times[times.length - 1] - times[times.length - 2]
+  return tickT - times[times.length - 1] > 2 * bar
+})
+let lastSeriesReload = 0
+watch(seriesBehind, (behind) => {
+  if (behind && !isLoading.value && Date.now() - lastSeriesReload > 30000) {
+    lastSeriesReload = Date.now()
+    fetchCandles()
+  }
+})
 
 // A new analysis snapshot means new closed candles: refresh the candles so
 // overlays and candles describe the same data.
@@ -582,7 +606,7 @@ function renderChart() {
   const geom = {
     ctx, width, height, padding, chartWidth, chartHeight, getY, chartMin, chartMax, candleList, candleSpacing, isDark,
     allCandles, allTimes, start, future, barMs, followingLatest, hits: [], labels: [],
-    labelReqs: [], reserved: [],
+    labelReqs: [], reserved: [], livePrice,
   }
   lastGeom = geom
   const range = { min: chartMin, max: chartMax }
@@ -1083,54 +1107,60 @@ function drawOverlay(geom, item, highlighted) {
       break
     }
     case 'scenario': {
-      // The engine gives trigger + invalidation LEVELS only (no time, no path):
-      // no trajectory is drawn. Conditional space after the last candle.
+      // Conditional projection between REAL engine prices, in the order of the
+      // conditions: current price -> trigger -> target (only when the trade
+      // plan for this scenario provides one; otherwise a direction arrow).
+      // The horizontal axis inside the projection area is schematic: it shows
+      // order, not timing. Never presented as a forecast.
       if (!geom.future) break
       const tier = SCENARIO_TIER_STYLE[o.meta?.tier] || SCENARIO_TIER_STYLE.secondary
       const strong = o.meta?.tier === 'primary' || o.meta?.tier === 'unranked'
+      const top = padding.top
+      const bottom = geom.height - padding.bottom
+      const offY = (yy) => yy < top || yy > bottom
       const lastIdx = geom.allCandles.length - 1
-      const x0 = indexToX(geom, lastIdx) + geom.candleSpacing
-      const xm = indexToX(geom, lastIdx + Math.max(2, geom.future - 3))
+      const xNow = indexToX(geom, lastIdx)
+      const x0 = xNow + geom.candleSpacing
+      const xT = indexToX(geom, lastIdx + Math.max(3, Math.round(geom.future * 0.45)))
+      const xE = right - 6
       const [, b] = o.points
-      const y1 = getY(b.price)
+      const yNow = getY(geom.livePrice ?? o.points[0].price)
+      const yT = getY(b.price)
       const dir = o.color === 'bearish' ? 1 : -1
-      if (y1 < padding.top || y1 > geom.height - padding.bottom) {
-        // Trigger outside the visible price range: keep the scenario visible as
-        // an edge tag (no band drawn off-screen).
+      if (offY(yT)) {
+        // Trigger outside the visible price range: edge tag, no off-screen geometry.
         if (strong) {
-          const above = y1 < padding.top
+          const above = yT < top
           placeLabel(geom, `${above ? '▲' : '▼'} ${scenarioBadge(o)} · TRIGGER ${fmt(b.price)}`, right - 4,
-            above ? padding.top + 14 : geom.height - padding.bottom - 4, { color, tag: true, priority: 3, key: o.id, ids })
+            above ? top + 14 : bottom - 4, { color, tag: true, priority: 3, key: o.id, ids })
         }
         break
       }
-      ctx.globalAlpha *= tier.alpha * (o.meta?.muted ? MUTED_FACTOR : 1) * (strong ? 1 : 0.75)
-      ctx.lineWidth = tier.width
+      // PRIMARY/UNRANKED stay dominant even when muted (low conviction / against HTF).
+      ctx.globalAlpha *= tier.alpha * (o.meta?.muted ? (strong ? 0.85 : MUTED_FACTOR) : 1) * (strong ? 1 : 0.7)
+      const base = ctx.globalAlpha
       if (strong) {
         // Conditional area: subtle shade, separate from price history.
         ctx.save()
         ctx.globalAlpha = 0.035
         ctx.fillStyle = PALETTE.bull
-        ctx.fillRect(x0 - geom.candleSpacing / 2, padding.top, right - x0 + geom.candleSpacing / 2, geom.height - padding.top - padding.bottom)
+        ctx.fillRect(x0 - geom.candleSpacing / 2, top, right - x0 + geom.candleSpacing / 2, bottom - top)
         ctx.restore()
       }
-      // Trigger zone.
-      const base = ctx.globalAlpha
+
+      // Trigger area (translucent band at the trigger level).
       ctx.fillStyle = FILL_COLOR[o.color] || color
-      ctx.globalAlpha = Math.min(1, base * (strong ? 0.35 : 0.16) * (FILL_GAIN[o.color] ?? 1))
-      ctx.fillRect(x0, y1 - (strong ? 5 : 3), right - x0, strong ? 10 : 6)
+      ctx.globalAlpha = Math.min(1, base * (strong ? 0.32 : 0.15) * (FILL_GAIN[o.color] ?? 1))
+      ctx.fillRect(x0, yT - (strong ? 5 : 3), right - x0, strong ? 10 : 6)
       ctx.globalAlpha = base
       ctx.fillStyle = color
-      ctx.beginPath(); ctx.moveTo(x0, y1); ctx.lineTo(right, y1); ctx.stroke()
-      // Direction (the scenario's own direction), not a price target.
-      const len = strong ? 26 : 14
-      ctx.beginPath(); ctx.moveTo(xm, y1 + dir * 4); ctx.lineTo(xm, y1 + dir * len); ctx.stroke()
-      drawLineArrow(ctx, xm, y1 + dir * 4, xm, y1 + dir * len, strong ? 7 : 5)
+
+      // Invalidation boundary.
       const inval = o.meta?.invalidation_price
-      if (typeof inval === 'number') {
+      if (typeof inval === 'number' && !offY(getY(inval))) {
         const yi = getY(inval)
         ctx.save()
-        ctx.globalAlpha = base * (strong ? 0.9 : 0.45)
+        ctx.globalAlpha = base * (strong ? 0.85 : 0.4)
         ctx.strokeStyle = OVERLAY_COLORS.stop
         ctx.setLineDash([5, 3])
         ctx.beginPath(); ctx.moveTo(x0, yi); ctx.lineTo(right, yi); ctx.stroke()
@@ -1139,13 +1169,49 @@ function drawOverlay(geom, item, highlighted) {
           placeLabel(geom, `INVALIDATION ${fmt(inval)}`, right - 4, yi - 3, { color: OVERLAY_COLORS.stop, priority: 3, key: `${o.id}:inval`, ids })
         }
       }
-      placeLabel(geom, scenarioBadge(o), right - 4, y1 + (dir > 0 ? -9 : 17), {
+
+      // Target area (only from the trade plan of this scenario).
+      const target = o.meta?.target_price
+      let yG = null
+      if (typeof target === 'number') {
+        if (offY(getY(target))) {
+          if (strong) {
+            const above = getY(target) < top
+            placeLabel(geom, `${above ? '▲' : '▼'} TARGET ${fmt(target)}`, right - 4, above ? top + 28 : bottom - 18,
+              { color, priority: 2, key: `${o.id}:target`, ids })
+          }
+        } else {
+          yG = getY(target)
+          ctx.save()
+          ctx.fillStyle = FILL_COLOR[o.color] || color
+          ctx.globalAlpha = Math.min(1, base * (strong ? 0.22 : 0.1) * (FILL_GAIN[o.color] ?? 1))
+          ctx.fillRect(xT, yG - 5, right - xT, 10)
+          ctx.restore()
+          if (strong) placeLabel(geom, `TARGET ${fmt(target)}`, right - 4, yG - 7, { color, priority: 2, key: `${o.id}:target`, ids })
+        }
+      }
+
+      // Projection path: current price -> trigger -> target / direction.
+      ctx.lineWidth = strong ? 2 : 1.2
+      ctx.setLineDash(strong ? [6, 4] : [3, 4])
+      const ex = yG !== null ? xE : Math.min(xE, xT + 46)
+      const ey = yG !== null ? yG : yT + dir * (strong ? 28 : 16)
+      ctx.beginPath()
+      ctx.moveTo(xNow, yNow)
+      ctx.lineTo(xT, yT)
+      ctx.lineTo(ex, ey)
+      ctx.stroke()
+      ctx.setLineDash([])
+      drawLineArrow(ctx, xT, yT, ex, ey, strong ? 8 : 6)
+      ctx.beginPath(); ctx.arc(xT, yT, strong ? 4 : 3, 0, Math.PI * 2); ctx.fill()
+
+      placeLabel(geom, scenarioBadge(o), xT - 8, yT + (dir > 0 ? -10 : 18), {
         color, tag: strong, priority: strong ? 3 : 1, key: o.id, ids,
       })
       if (strong) {
-        placeLabel(geom, 'TRIGGER', x0 + 4, y1 - 6, { align: 'left', color, priority: 2, key: `${o.id}:trigger`, ids })
+        placeLabel(geom, `TRIGGER ${fmt(b.price)}`, x0 + 4, yT + (dir > 0 ? 14 : -7), { align: 'left', color, priority: 2, key: `${o.id}:trigger`, ids })
       }
-      item.seg = [x0, y1, right, y1]
+      item.seg = [xNow, yNow, xT, yT]
       break
     }
     case 'marker': {
@@ -1595,6 +1661,7 @@ onUnmounted(() => {
           <span>· tick {{ tickTime }}</span>
         </template>
         <span>· last candle {{ lastCandleTime }}{{ lastCandleClose !== null ? ` (close ${fmtPrice(lastCandleClose)} at load)` : '' }}</span>
+        <span v-if="seriesBehind" class="text-amber">· series behind tick, reloading</span>
       </div>
 
       <div class="text-muted text-xs">

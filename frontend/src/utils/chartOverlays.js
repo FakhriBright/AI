@@ -558,7 +558,7 @@ function callout(symbol, tf, key, title, price, time, sources, extra = {}) {
  *    discount / equilibrium (<tf> range)".
  * 5. HTF conflict: market_bias.conflicts -> "Timeframe conflict".
  */
-export function buildDerived({ symbol, marketBias, scenarios, currentPrice, selectedName = null, stale = false }) {
+export function buildDerived({ symbol, marketBias, scenarios, currentPrice, selectedName = null, stale = false, tradePlan = null }) {
   if (!symbol || chartStore.symbol !== symbol) return
   const out = []
   const engine = Object.values(chartStore.engine)
@@ -639,10 +639,14 @@ export function buildDerived({ symbol, marketBias, scenarios, currentPrice, sele
         sources: [`scenario:${sc.name}`],
         trigger: sc.trigger, invalidation: sc.invalidation,
         invalidation_price: typeof sc.invalidation_reference === 'number' ? sc.invalidation_reference : null,
+        // Target only when the existing trade plan belongs to this scenario.
+        target_price: tradePlan?.scenario_name === sc.name && typeof tradePlan?.target_price === 'number'
+          ? tradePlan.target_price : null,
         conviction: sc.conviction, confirmed: Boolean(sc.trigger_confirmed),
         text: [
           sc.trigger ? `requires: ${String(sc.trigger).replace(/_/g, ' ')}` : `trigger ${sc.trigger_reference}`,
           sc.invalidation ? `invalid: ${String(sc.invalidation).replace(/_/g, ' ')}` : null,
+          'path = order of conditions (price -> trigger -> target), not timing; conditional, not a forecast',
         ].filter(Boolean).join(' · '),
         tier: rank?.tier || 'secondary', muted: Boolean(rank?.muted), rank: rank?.rank,
         rank_reasons: rank?.reasons || [],
