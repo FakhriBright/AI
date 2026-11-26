@@ -290,8 +290,12 @@ export function layoutLabels(requests, { reserved = [], bounds, offsets = [0, -1
   if (global.length) {
     const text = `+${global.length} more`
     const w = 8 + text.length * 6
+    // Plot corner, moved down the left edge past any label already placed there.
     const l = bounds ? bounds.l + 2 : 2
-    const t = bounds ? bounds.t + 2 : 2
+    const busy = [...taken, ...grouped.map((g) => g.rect)]
+    let t = bounds ? bounds.t + 2 : 2
+    const maxT = bounds ? bounds.b - 13 : t + 13 * 20
+    while (t < maxT && busy.some((q) => overlaps({ l, r: l + w, t, b: t + 11 }, q))) t += 13
     grouped.push({ text, rect: { l, r: l + w, t, b: t + 11 }, items: global, x: l + w, y: t + 11, global: true })
   }
 
@@ -444,22 +448,15 @@ export function scenarioBadge(o) {
 // 8. Viewport stability (hysteresis for the automatic price range)
 // ---------------------------------------------------------------------------
 /**
- * Keeps the previous automatic range while the new candle-based range still
- * fits inside it and the previous one is not much wider (<= 1.6x). Expands
- * only when needed, shrinks only when clearly too wide, and starts fresh when
- * the viewport key changes (symbol, timeframe, zoom/pan window). This avoids
- * the scale moving on every tick. Pure; market coordinates are untouched.
+ * Within one viewport key the automatic range never shrinks and only expands
+ * as far as the candles / current price need (live ticks never make it jump).
+ * A fresh range is computed only when the key changes: symbol, timeframe,
+ * zoom/pan window, chart height, a new bar, or an explicit reset. Pure;
+ * market coordinates are untouched.
  */
-export function stabilizeScale(prev, next, key, maxWiden = 1.6) {
+export function stabilizeScale(prev, next, key) {
   if (!next) return prev
-  const fresh = { min: next.min, max: next.max, key }
-  if (!prev || prev.key !== key) return fresh
-  const nextSpan = next.max - next.min
-  const fits = next.min >= prev.min && next.max <= prev.max
-  if (fits && prev.max - prev.min <= nextSpan * maxWiden) return prev
-  if (!fits) {
-    const union = { min: Math.min(prev.min, next.min), max: Math.max(prev.max, next.max), key }
-    if (union.max - union.min <= nextSpan * maxWiden) return union
-  }
-  return fresh
+  if (!prev || prev.key !== key) return { min: next.min, max: next.max, key }
+  if (next.min >= prev.min && next.max <= prev.max) return prev
+  return { min: Math.min(prev.min, next.min), max: Math.max(prev.max, next.max), key }
 }

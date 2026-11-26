@@ -646,7 +646,7 @@ export function buildDerived({ symbol, marketBias, scenarios, currentPrice, sele
         text: [
           sc.trigger ? `requires: ${String(sc.trigger).replace(/_/g, ' ')}` : `trigger ${sc.trigger_reference}`,
           sc.invalidation ? `invalid: ${String(sc.invalidation).replace(/_/g, ' ')}` : null,
-          'path = order of conditions (price -> trigger -> target), not timing; conditional, not a forecast',
+          'references only (trigger / invalidation / target when the plan provides one); no price path implied; conditional, not a forecast',
         ].filter(Boolean).join(' · '),
         tier: rank?.tier || 'secondary', muted: Boolean(rank?.muted), rank: rank?.rank,
         rank_reasons: rank?.reasons || [],

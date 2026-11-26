@@ -95,7 +95,7 @@ const props = defineProps({
 // Candles loaded per timeframe; the viewport shows a window of them.
 const CANDLE_COUNT = 300
 const DEFAULT_VISIBLE = 80
-const FUTURE_BARS = 14 // conditional projection space after the last candle (schematic, no timing)
+const FUTURE_BARS = 10 // scenario reference space after the last candle (only when a scenario is in view)
 
 // Chart workspace palette (mandatory). Bullish = soft white, bearish =
 // midnight blue violet on a dark navy canvas. #30265F is used for bodies and
@@ -194,6 +194,7 @@ const priceSourceHelp = 'Bid/Ask: live MT5 tick (same value as the header, refre
 
 function resetView() {
   view.value = { size: DEFAULT_VISIBLE, anchor: null }
+  scaleState = null // explicit reset: recompute the automatic price range
 }
 const visibleRange = ref(null) // price range of the last render (for Relevant Only)
 
@@ -362,6 +363,9 @@ async function fetchCandles() {
     candles.value = []
   } finally {
     isLoading.value = false
+    // A newly loaded series (symbol / timeframe / reload) never inherits the
+    // range of the previous series (e.g. EURUSDm range merged into XAUUSDm).
+    scaleState = null
     renderChart()
   }
 }
@@ -523,7 +527,6 @@ function renderChart() {
   const followingLatest = start === latestStart
   const candleList = allCandles.slice(start, start + size)
   // Future space only at the live edge and only when scenarios are drawn.
-  const future = followingLatest && layerPrefs.value.byTf[activeTf.value]?.scenario ? FUTURE_BARS : 0
 
   let maxVol = 0
   for (const c of candleList) {
@@ -538,7 +541,8 @@ function renderChart() {
   const livePrice = liveBid.value ?? allCandles[allCandles.length - 1]?.close
   // Hysteresis: the range only changes when the candles need it, not on every
   // tick; it starts fresh when symbol, timeframe or the zoom/pan window change.
-  const viewportKey = `${props.symbol}|${activeTf.value}|${followingLatest ? 'latest' : start}|${size}|${future}|${height}`
+  const lastBarTime = allCandles[allCandles.length - 1]?.time_utc
+  const viewportKey = `${props.symbol}|${activeTf.value}|${followingLatest ? `latest:${lastBarTime}` : start}|${size}|${height}`
   const scale = stabilizeScale(scaleState, computeAutoscale(candleList, {
     currentPrice: followingLatest ? livePrice : null,
     refs: [triggerRef, invalidationRef],
@@ -547,6 +551,12 @@ function renderChart() {
   const chartMin = scale.min
   const chartMax = scale.max
   const adjustedRange = chartMax - chartMin
+  // Reference space after the last candle only when a scenario trigger lies in
+  // the visible price range (no empty projection area otherwise).
+  const scenarioInView = followingLatest && Boolean(layerPrefs.value.byTf[activeTf.value]?.scenario)
+    && Object.values(chartStore.derived).some((o) => o.kind === 'scenario'
+      && o.points?.[1]?.price >= chartMin && o.points[1].price <= chartMax)
+  const future = scenarioInView ? FUTURE_BARS : 0
 
   function getY(price) {
     return padding.top + chartHeight - ((price - chartMin) / adjustedRange) * chartHeight
@@ -932,7 +942,7 @@ function drawOverlay(geom, item, highlighted) {
       const fill = ({ premium: 0.06, discount: 0.06, supply: 0.1, demand: 0.1, fvg: 0.16, ob: 0.2 }[type] ?? 0.12)
         * style.fill * gain * (consolidated ? 0.35 : 1) * (EMPHASIS_STYLE[emph]?.fill ?? 1)
         // HTF backgrounds must not dominate local price action (execution charts most).
-        * (htf ? (type === 'premium' || type === 'discount' ? 0.3 : tfProfile(activeTf.value).label === 'EXECUTION' ? 0.55 : 0.8) : 1)
+        * (htf ? (type === 'premium' || type === 'discount' ? 0.25 : tfProfile(activeTf.value).label === 'EXECUTION' ? 0.4 : 0.75) : 1)
       ctx.fillStyle = FILL_COLOR[o.color] || color
       ctx.globalAlpha = Math.min(1, base * (highlighted ? fill + 0.14 : fill))
       ctx.fillRect(x1, yTop, w, yBottom - yTop)
@@ -1046,10 +1056,15 @@ function drawOverlay(geom, item, highlighted) {
       const isEq = type === 'eqh' || type === 'eql'
       let xe = x2
       let ye = y2
-      if (o.extend) {
-        xe = right
+      // Bounded: an active trendline may extend to the last candle only (never
+      // into the scenario/reference space); a broken one is not extended.
+      const xLast = indexToX(geom, geom.allCandles.length - 1)
+      if (o.extend && o.status !== 'broken' && xLast > x2) {
+        xe = Math.min(right, xLast)
         ye = y2 + ((y2 - y1) / (x2 - x1)) * (xe - x2)
       }
+      // Historical/secondary trendlines stay subordinate to price action.
+      if (!isEq && !highlighted && emph !== 'primary') ctx.globalAlpha *= 0.55
       if (isEq) {
         // Liquidity pool: band between the equal highs/lows.
         const base = ctx.globalAlpha
@@ -1199,19 +1214,26 @@ function drawOverlay(geom, item, highlighted) {
         }
       }
 
-      // Projection path between real prices only: current price -> trigger, and
-      // trigger -> target when the trade plan provides one. No artificial
-      // continuation is drawn when the target is unavailable.
-      ctx.lineWidth = strong ? 2 : 1.2
-      ctx.setLineDash(strong ? [6, 4] : [3, 4])
-      ctx.beginPath()
-      ctx.moveTo(xNow, yNow)
-      ctx.lineTo(xT, yT)
-      if (yG !== null) ctx.lineTo(xE, yG)
-      ctx.stroke()
+      // Scenario REFERENCES only (no price path is known, none is drawn):
+      // - distance bracket: current price <-> trigger on ONE x position, so no
+      //   timing or route is implied;
+      // - straight trigger -> target connector only when the trade plan of this
+      //   scenario provides a target (two real coordinates, nodes, no arrow);
+      // - styled as dotted references, distinct from solid historical trendlines.
+      ctx.lineWidth = strong ? 1.5 : 1
+      ctx.setLineDash([2, 3])
+      if (Math.abs(yT - yNow) > 6) {
+        ctx.beginPath()
+        ctx.moveTo(x0, yNow); ctx.lineTo(x0, yT)
+        ctx.moveTo(x0 - 3, yNow); ctx.lineTo(x0 + 3, yNow)
+        ctx.stroke()
+      }
+      if (yG !== null) {
+        ctx.beginPath(); ctx.moveTo(xT, yT); ctx.lineTo(xE, yG); ctx.stroke()
+        ctx.setLineDash([])
+        ctx.beginPath(); ctx.arc(xE, yG, strong ? 3.5 : 2.5, 0, Math.PI * 2); ctx.fill()
+      }
       ctx.setLineDash([])
-      if (yG !== null) drawLineArrow(ctx, xT, yT, xE, yG, strong ? 8 : 6)
-      else if (Math.hypot(xT - xNow, yT - yNow) > 10) drawLineArrow(ctx, xNow, yNow, xT, yT, strong ? 7 : 5)
       ctx.beginPath(); ctx.arc(xT, yT, strong ? 4 : 3, 0, Math.PI * 2); ctx.fill()
 
       placeLabel(geom, scenarioBadge(o), xT - 8, yT + (dir > 0 ? -10 : 18), {
@@ -1220,7 +1242,7 @@ function drawOverlay(geom, item, highlighted) {
       if (strong) {
         placeLabel(geom, `TRIGGER ${fmt(b.price)}`, x0 + 4, yT + (dir > 0 ? 14 : -7), { align: 'left', color, priority: 2, key: `${o.id}:trigger`, ids })
       }
-      item.seg = [xNow, yNow, xT, yT]
+      item.seg = [x0, yT, right, yT] // hover/click on the trigger reference
       break
     }
     case 'marker': {
