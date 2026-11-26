@@ -34,7 +34,10 @@ import {
   MUTED_FACTOR,
   SCENARIO_TIER_STYLE,
   assignEmphasis,
+  computeAutoscale,
+  scenarioBadge,
   shortScenarioName,
+  tfProfile,
   buildConfluence,
   confluenceLabel,
   layoutLabelsCached,
@@ -65,6 +68,11 @@ const props = defineProps({
   },
   // Latest closed candle the analysis used (MT5 server time).
   analysisCandle: {
+    type: Object,
+    default: null,
+  },
+  // Live tick (bid/ask) polled by the app every 2 s; the header shows the same bid.
+  liveTick: {
     type: Object,
     default: null,
   },
@@ -143,21 +151,39 @@ const selected = ref(null) // pinned object details
 
 // Display precision from the market data itself (symbol tick size).
 const priceDigits = computed(() => {
+  // Smallest decimal count that represents each price exactly; ignores binary
+  // float noise from the feed (e.g. 1.0965799999999999 -> 5 decimals).
   let digits = 0
   for (const c of candles.value.slice(-50)) {
     for (const v of [c.open, c.high, c.low, c.close]) {
-      const text = String(v)
-      const d = text.includes('.') ? text.split('.')[1].length : 0
+      if (typeof v !== 'number') continue
+      let d = 0
+      while (d < 6 && Math.abs(v - Number(v.toFixed(d))) > 1e-9) d += 1
       if (d > digits) digits = d
     }
   }
-  return Math.min(digits, 6)
+  return digits
 })
 
 function fmtPrice(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return formatPrice(value, props.symbol)
   return candles.value.length ? value.toFixed(priceDigits.value) : formatPrice(value, props.symbol)
 }
+
+// Live price (header and chart marker) = MT5 tick bid for this symbol. The
+// candle series is loaded on timeframe change / new analysis, so its last
+// close can lag the tick by up to one refresh; both are shown with their meaning.
+const liveBid = computed(() => {
+  const t = props.liveTick
+  return t && t.symbol === props.symbol && typeof t.bid === 'number' ? t.bid : null
+})
+const liveAsk = computed(() => (liveBid.value !== null && typeof props.liveTick?.ask === 'number' ? props.liveTick.ask : null))
+const tickTime = computed(() => (props.liveTick?.time_utc ? `${String(props.liveTick.time_utc).slice(11, 19)} UTC` : '—'))
+const lastCandle = computed(() => candles.value[candles.value.length - 1] || null)
+const lastCandleTime = computed(() => (lastCandle.value?.time_utc ? `${String(lastCandle.value.time_utc).slice(11, 16)} UTC` : '—'))
+const lastCandleClose = computed(() => (typeof lastCandle.value?.close === 'number' ? lastCandle.value.close : null))
+const priceSourceHelp = 'Bid/Ask: live MT5 tick (same value as the header, refreshed every 2 s). '
+  + 'Last candle: newest candle of the loaded series (may still be forming); its close was the bid when the series was loaded.'
 
 function resetView() {
   view.value = { size: DEFAULT_VISIBLE, anchor: null }
@@ -377,6 +403,9 @@ function rebuildDerived() {
 
 watch(() => [props.marketBias, props.scenarios, props.selectedScenario, isStale.value], rebuildDerived)
 watch(view, () => renderChart(), { deep: true })
+// Live tick (every 2 s): redraw so the BID marker follows the header price
+// (label layout is cached, only the marker moves).
+watch(liveBid, () => renderChart())
 
 // A new analysis snapshot means new closed candles: refresh the candles so
 // overlays and candles describe the same data.
@@ -470,32 +499,23 @@ function renderChart() {
   // Future space only at the live edge and only when scenarios are drawn.
   const future = followingLatest && layerPrefs.value.byTf[activeTf.value]?.scenario ? FUTURE_BARS : 0
 
-  // Min and Max prices
-  let minPrice = Infinity
-  let maxPrice = -Infinity
   let maxVol = 0
-
   for (const c of candleList) {
-    if (c.low < minPrice) minPrice = c.low
-    if (c.high > maxPrice) maxPrice = c.high
     if (c.tick_volume > maxVol) maxVol = c.tick_volume
   }
 
+  // Candle-first autoscale: visible OHLC (+ live price at the live edge).
+  // Scenario references only widen the range when they are near the candles;
+  // distant ones become edge tags. Overlays never stretch the scale.
   const triggerRef = props.selectedScenario?.trigger_reference
   const invalidationRef = props.selectedScenario?.invalidation_reference
-  if (triggerRef && Math.abs(triggerRef - minPrice) / (maxPrice - minPrice || 1) < 2) {
-    minPrice = Math.min(minPrice, triggerRef)
-    maxPrice = Math.max(maxPrice, triggerRef)
-  }
-  if (invalidationRef && Math.abs(invalidationRef - minPrice) / (maxPrice - minPrice || 1) < 2) {
-    minPrice = Math.min(minPrice, invalidationRef)
-    maxPrice = Math.max(maxPrice, invalidationRef)
-  }
-
-  const priceRange = maxPrice - minPrice || 1
-  const priceMargin = priceRange * 0.08
-  const chartMin = minPrice - priceMargin
-  const chartMax = maxPrice + priceMargin
+  const livePrice = liveBid.value ?? allCandles[allCandles.length - 1]?.close
+  const scale = computeAutoscale(candleList, {
+    currentPrice: followingLatest ? livePrice : null,
+    refs: [triggerRef, invalidationRef],
+  })
+  const chartMin = scale.min
+  const chartMax = scale.max
   const adjustedRange = chartMax - chartMin
 
   function getY(price) {
@@ -614,8 +634,10 @@ function renderChart() {
     }
   }
 
-  // Current price: dashed line + axis tag (last candle close from the live feed).
-  const lastClose = allCandles[allCandles.length - 1]?.close
+  // Current price marker: live BID (same source as the header). Falls back to the
+  // last candle close, labelled LAST, when no tick is available.
+  const lastClose = livePrice
+  const priceKind = liveBid.value !== null ? 'BID' : 'LAST'
   if (typeof lastClose === 'number' && lastClose >= chartMin && lastClose <= chartMax) {
     const yp = getY(lastClose)
     ctx.save()
@@ -629,6 +651,10 @@ function renderChart() {
     ctx.font = 'bold 10px monospace'
     ctx.textAlign = 'left'
     ctx.fillText(fmtPrice(lastClose), width - padding.right + 4, yp + 4)
+    ctx.font = 'bold 8px monospace'
+    ctx.fillStyle = isDark ? '#14b8a6' : '#0f766e'
+    ctx.textAlign = 'right'
+    ctx.fillText(priceKind, width - padding.right - 3, yp - 3)
     ctx.restore()
     // Labels may not cover the current price marker near the axis.
     geom.reserved.push({ l: width - padding.right - 70, r: width - padding.right, t: yp - 7, b: yp + 7 })
@@ -929,11 +955,14 @@ function drawOverlay(geom, item, highlighted) {
       if (major && (type === 'support' || type === 'resistance')) ctx.lineWidth += 0.6
       if ((type === 'support' || type === 'resistance') && !o.time_start) {
         // Price-only level: compact segment at the live edge, not a full-width line.
+        // Supporting (minor) levels are faint and unlabelled unless primary.
+        const showLabel = (major || emph === 'primary' || highlighted) && !geom.consolidated?.has(o.id)
+        if (!major && emph !== 'primary' && !highlighted) ctx.globalAlpha *= 0.5
         ctx.beginPath()
         ctx.moveTo(Math.max(padding.left, right - chartWidth * 0.35), y)
         ctx.lineTo(right, y)
         ctx.stroke()
-        if (!minimal || highlighted) {
+        if (showLabel && (!minimal || highlighted)) {
           placeLabel(geom, `${tfTag}${SHORT_NAME[type]}${major ? ' major' : ''}`, right - 4, y - 3, { color, priority, key: o.id, ids })
         }
         break
@@ -966,7 +995,7 @@ function drawOverlay(geom, item, highlighted) {
         if (!minimal) placeLabel(geom, `${tfTag}${SHORT_NAME[type] || o.name} swept`, x2 - 8, y - 3, { color, priority: 1, key: o.id, ids })
       } else if (highlighted || o.layer === 'trade_plan') {
         placeLabel(geom, `${label} ${fmt(o.price)}`, x2 - 2, y - 9, { color, tag: true, priority: 3, key: o.id, ids })
-      } else if (!minimal) {
+      } else if (!minimal && !geom.consolidated?.has(o.id)) {
         // Liquidity labels sit at their origin (the swing), keeping the right edge clear.
         const atOrigin = type === 'bsl' || type === 'ssl'
         placeLabel(geom, `${tfTag}${SHORT_NAME[type] || o.name}`, atOrigin ? Math.max(padding.left + 2, x1 + 4) : x2 - 4, y - 3, {
@@ -1070,7 +1099,7 @@ function drawOverlay(geom, item, highlighted) {
         // an edge tag (no band drawn off-screen).
         if (strong) {
           const above = y1 < padding.top
-          placeLabel(geom, `${above ? '▲' : '▼'} ${tier.label} ${shortScenarioName(o.name)} · trigger ${fmt(b.price)}`, right - 4,
+          placeLabel(geom, `${above ? '▲' : '▼'} ${scenarioBadge(o)} · TRIGGER ${fmt(b.price)}`, right - 4,
             above ? padding.top + 14 : geom.height - padding.bottom - 4, { color, tag: true, priority: 3, key: o.id, ids })
         }
         break
@@ -1107,12 +1136,15 @@ function drawOverlay(geom, item, highlighted) {
         ctx.beginPath(); ctx.moveTo(x0, yi); ctx.lineTo(right, yi); ctx.stroke()
         ctx.restore()
         if (strong) {
-          placeLabel(geom, `✕ ${fmt(inval)}`, right - 4, yi - 3, { color: OVERLAY_COLORS.stop, priority: 3, key: `${o.id}:inval`, ids })
+          placeLabel(geom, `INVALIDATION ${fmt(inval)}`, right - 4, yi - 3, { color: OVERLAY_COLORS.stop, priority: 3, key: `${o.id}:inval`, ids })
         }
       }
-      placeLabel(geom, `${tier.label} ${o.color === 'bearish' ? '▼' : '▲'} ${shortScenarioName(o.name)}`, right - 4, y1 + (dir > 0 ? -9 : 17), {
+      placeLabel(geom, scenarioBadge(o), right - 4, y1 + (dir > 0 ? -9 : 17), {
         color, tag: strong, priority: strong ? 3 : 1, key: o.id, ids,
       })
+      if (strong) {
+        placeLabel(geom, 'TRIGGER', x0 + 4, y1 - 6, { align: 'left', color, priority: 2, key: `${o.id}:trigger`, ids })
+      }
       item.seg = [x0, y1, right, y1]
       break
     }
@@ -1301,7 +1333,7 @@ function drawOverlays(geom, items, phase) {
     const oldSwing = (item.swingRank ?? 0) >= 2
     item.style = lifecycleStyle(o.status, { historical: oldSwing && !highlighted })
     ctx.save()
-    ctx.globalAlpha = item.style.alpha * (isStale.value ? 0.5 : 1) * (item.htf ? 0.6 : 1)
+    ctx.globalAlpha = item.style.alpha * (isStale.value ? 0.5 : 1) * (item.htf ? tfProfile(activeTf.value).htfAlpha : 1)
       * (highlighted ? 1 : (EMPHASIS_STYLE[item.emph]?.alpha ?? 1))
     ctx.strokeStyle = color
     ctx.fillStyle = color
@@ -1556,15 +1588,20 @@ onUnmounted(() => {
         <span>L: <strong class="font-mono">{{ fmtPrice(hoveredCandle.low) }}</strong></span> &nbsp;
         <span>C: <strong class="font-mono" :class="hoveredCandle.close >= hoveredCandle.open ? 'text-green' : 'text-red'">{{ fmtPrice(hoveredCandle.close) }}</strong></span>
       </div>
-      <div v-else class="text-muted">
-        <span>Hover over candles to view bar data.</span>
+      <div v-else class="text-muted text-xs price-sources" :title="priceSourceHelp">
+        <template v-if="liveBid !== null">
+          <span>Bid <strong class="font-mono text-main">{{ fmtPrice(liveBid) }}</strong></span>
+          <span v-if="liveAsk !== null">· Ask <strong class="font-mono">{{ fmtPrice(liveAsk) }}</strong></span>
+          <span>· tick {{ tickTime }}</span>
+        </template>
+        <span>· last candle {{ lastCandleTime }}{{ lastCandleClose !== null ? ` (close ${fmtPrice(lastCandleClose)} at load)` : '' }}</span>
       </div>
 
       <div class="text-muted text-xs">
         <span title="Mouse wheel: zoom · drag: pan · double-click: back to latest · click an object: details">
           Wheel zoom · drag pan · dbl-click reset ·
         </span>
-        <span>Timeframe: <strong>{{ activeTf }}</strong></span>
+        <span>Timeframe: <strong>{{ activeTf }}</strong> · {{ tfProfile(activeTf).label }}</span>
       </div>
     </div>
 

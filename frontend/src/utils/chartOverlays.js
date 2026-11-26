@@ -13,7 +13,7 @@
  * only decides what is drawn. It never alters or deletes a detection result.
  */
 import { reactive } from 'vue'
-import { rankScenarios } from './chartVisuals.js'
+import { rankScenarios, tfProfile } from './chartVisuals.js'
 
 export const TIMEFRAMES = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1']
 
@@ -358,8 +358,11 @@ function inRange(o, range) {
  * "Show history" off hides mitigated / taken / broken objects and swing labels
  * older than the last four per kind.
  */
+const STRUCTURE_TYPES = new Set(['HH', 'HL', 'LH', 'LL', 'swing', 'bos', 'choch'])
+
 export function visibleOverlays(activeTf, prefs, range = null) {
   const tfPrefs = prefs.byTf[activeTf] || {}
+  const profile = tfProfile(activeTf)
   const hidden = new Set(chartStore.hiddenIds)
   const swingRank = new Map()
   const bySwingKind = {}
@@ -390,7 +393,9 @@ export function visibleOverlays(activeTf, prefs, range = null) {
       // Scenarios: primary/unranked always (when the layer is on); secondary
       // stays accessible (faint) except in minimal-label mode.
       if (type === 'scenario' && o.meta?.tier === 'secondary' && prefs.labels === 'minimal') continue
-      if (!prefs.showHistory && (historical || (rank !== undefined && rank >= 4))) continue
+      // Macro charts (H4/D1 profile) keep historical structure, faded.
+      const keepStructure = profile.structureHistory && STRUCTURE_TYPES.has(type)
+      if (!prefs.showHistory && !keepStructure && (historical || (rank !== undefined && rank >= 4))) continue
       if (prefs.relevantOnly && o.timeframe !== 'MTF') {
         if (!LIVE_STATUSES.has(o.status) || !inRange(o, range)) continue
         if (rank !== undefined && rank >= 2) continue
@@ -400,6 +405,9 @@ export function visibleOverlays(activeTf, prefs, range = null) {
     }
 
     if (tfRank(o.timeframe) <= tfRank(activeTf)) continue
+    // Timeframe profile: only the reference timeframes relevant to this chart
+    // (e.g. M5 -> H1/H4 only), never every higher timeframe.
+    if (!profile.htfTimeframes.includes(o.timeframe)) continue
     const group = HTF_GROUPS.find((g) => g.types.includes(type))
     if (!group || !prefs.htf[group.id]) continue
     if (!LIVE_STATUSES.has(o.status) || !inRange(o, range)) continue

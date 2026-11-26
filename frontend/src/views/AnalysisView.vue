@@ -50,6 +50,7 @@ const emit = defineEmits(['retry'])
       :overlay-payload="analysisData?.chart_overlays"
       :generated-at="analysisData?.generated_at_utc"
       :analysis-candle="analysisData?.latest_candle"
+      :live-tick="liveTick"
       :market-bias="analysisData?.market_bias"
       :scenarios="analysisData?.scenarios"
     />

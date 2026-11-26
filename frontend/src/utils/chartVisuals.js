@@ -334,3 +334,71 @@ export function shortScenarioName(name) {
   const text = String(name || '').replace(/^CONDITIONAL · /, '').replace(/_/g, ' ')
   return text.length > 22 ? `${text.slice(0, 21)}…` : text
 }
+
+// ---------------------------------------------------------------------------
+// 6. Timeframe display profiles (visualization only, no analysis)
+// ---------------------------------------------------------------------------
+// htfTimeframes: which higher timeframes may appear as references on this chart.
+// htfAlpha: intensity of those references. structureHistory: keep historical
+// structure (faded) visible on macro charts.
+export const TF_PROFILES = {
+  M1: { label: 'EXECUTION', htfTimeframes: ['H1', 'H4'], htfAlpha: 0.4, structureHistory: false },
+  M5: { label: 'EXECUTION', htfTimeframes: ['H1', 'H4'], htfAlpha: 0.4, structureHistory: false },
+  M15: { label: 'EXECUTION', htfTimeframes: ['H1', 'H4'], htfAlpha: 0.45, structureHistory: false },
+  M30: { label: 'INTRADAY', htfTimeframes: ['H1', 'H4'], htfAlpha: 0.5, structureHistory: false },
+  H1: { label: 'INTRADAY', htfTimeframes: ['H4', 'D1'], htfAlpha: 0.55, structureHistory: false },
+  H4: { label: 'MACRO', htfTimeframes: ['D1'], htfAlpha: 0.65, structureHistory: true },
+  D1: { label: 'MACRO', htfTimeframes: [], htfAlpha: 0.65, structureHistory: true },
+}
+
+export function tfProfile(tf) {
+  return TF_PROFILES[tf] || TF_PROFILES.M5
+}
+
+// ---------------------------------------------------------------------------
+// 7. Candle-first autoscale (price range of the viewport)
+// ---------------------------------------------------------------------------
+/**
+ * The visible candles' OHLC define the range. The current price is added when
+ * given (caller passes it only at the live edge). Reference levels (e.g. the
+ * selected scenario trigger/invalidation) are added only when they lie within
+ * `nearFraction` of the candle range beyond its edges; farther references are
+ * returned in `excluded` and shown as edge tags instead of compressing candles.
+ * Pure: never changes any market coordinate.
+ */
+export function computeAutoscale(candles, { currentPrice = null, refs = [], pad = 0.06, nearFraction = 0.25 } = {}) {
+  let lo = Infinity
+  let hi = -Infinity
+  for (const c of candles) {
+    if (c.low < lo) lo = c.low
+    if (c.high > hi) hi = c.high
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null
+  if (typeof currentPrice === 'number' && Number.isFinite(currentPrice)) {
+    lo = Math.min(lo, currentPrice)
+    hi = Math.max(hi, currentPrice)
+  }
+  const base = hi - lo || Math.abs(hi) * 0.0005 || 1
+  const included = []
+  const excluded = []
+  for (const r of refs) {
+    if (typeof r !== 'number' || !Number.isFinite(r)) continue
+    const beyond = r > hi ? r - hi : r < lo ? lo - r : 0
+    if (beyond <= base * nearFraction) included.push(r)
+    else excluded.push(r)
+  }
+  for (const r of included) {
+    lo = Math.min(lo, r)
+    hi = Math.max(hi, r)
+  }
+  const range = hi - lo || base
+  return { min: lo - range * pad, max: hi + range * pad, included, excluded }
+}
+
+/** Compact direction word for scenario labels. */
+export function scenarioBadge(o) {
+  const dir = o.color === 'bearish' ? 'BEARISH' : 'BULLISH'
+  const tier = { primary: 'PRIMARY', unranked: 'UNRANKED', secondary: 'SECONDARY' }[o.meta?.tier] || 'SECONDARY'
+  const counter = (o.meta?.rank_reasons || []).includes('against HTF') || /counter/i.test(o.name || '')
+  return `${tier} ${dir}${counter ? ' · COUNTERTREND' : ''}`
+}
