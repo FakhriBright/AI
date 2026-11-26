@@ -205,11 +205,15 @@ export function layoutLabels(requests, { reserved = [], bounds, offsets = [0, -1
   const placed = []
   const taken = [...reserved]
   const overflow = []
-  const ordered = [...requests].sort((a, b) => b.priority - a.priority || String(a.key).localeCompare(String(b.key)))
+  const ordered = [...requests]
+    .filter((r) => r.priority > 0) // priority 0 = no on-chart label (hover / Objects only)
+    .sort((a, b) => b.priority - a.priority || String(a.key).localeCompare(String(b.key)))
 
   for (const r of ordered) {
     let spot = null
-    const tries = r.priority >= 3 ? [...offsets, 48, -48] : r.priority >= 2 ? offsets : offsets.slice(0, 5)
+    // Primary labels may move further; secondary labels barely move and are
+    // grouped instead of being pushed around the chart.
+    const tries = r.priority >= 3 ? [...offsets, 48, -48] : r.priority >= 2 ? offsets : [0, -12, 12]
     for (const dy of tries) {
       const left = r.align === 'right' ? r.x - r.w : r.align === 'center' ? r.x - r.w / 2 : r.x
       const rect = { l: left, r: left + r.w, t: r.y + dy - r.h, b: r.y + dy }
@@ -268,4 +272,65 @@ export function layoutLabels(requests, { reserved = [], bounds, offsets = [0, -1
   }
   for (const g of grouped) g.text = `+${g.items.length}`
   return { placed, grouped, hiddenCount: overflow.length }
+}
+
+// ---------------------------------------------------------------------------
+// 5. Visual emphasis: PRIMARY / SECONDARY / HISTORICAL (display only)
+// ---------------------------------------------------------------------------
+const ZONE_TYPES = new Set(['fvg', 'ob', 'supply', 'demand'])
+const HISTORICAL_STATUS = new Set(['mitigated', 'taken', 'broken', 'expired', 'invalidated'])
+
+/**
+ * Deterministic emphasis for drawn items (`{ overlay, htf, type, swingRank }`):
+ * HISTORICAL - mitigated / swept / broken / expired / invalidated objects and
+ *              swing labels older than the two most recent of their kind.
+ * PRIMARY    - the trade plan, PRIMARY or UNRANKED scenarios, BOS/CHoCH of the
+ *              chart timeframe, and the most relevant live zones: the zone(s)
+ *              containing the current price, otherwise the nearest live zone
+ *              above and the nearest below it (chart timeframe first, HTF only
+ *              if the chart timeframe has none on that side).
+ * SECONDARY  - everything else (HTF references, alternatives, other zones).
+ * Returns Map(id -> 'primary' | 'secondary' | 'historical').
+ */
+export function assignEmphasis(items, { currentPrice = null } = {}) {
+  const out = new Map()
+  for (const it of items) {
+    const o = it.overlay
+    let e = 'secondary'
+    if (HISTORICAL_STATUS.has(o.status) || (it.swingRank ?? 0) >= 2) e = 'historical'
+    else if (o.layer === 'trade_plan') e = 'primary'
+    else if (it.type === 'scenario' && ['primary', 'unranked'].includes(o.meta?.tier)) e = 'primary'
+    else if ((it.type === 'bos' || it.type === 'choch') && !it.htf) e = 'primary'
+    out.set(o.id, e)
+  }
+
+  if (typeof currentPrice === 'number') {
+    const zones = items.filter((it) => ZONE_TYPES.has(it.type) && out.get(it.overlay.id) !== 'historical'
+      && typeof it.overlay.price_low === 'number' && typeof it.overlay.price_high === 'number')
+    const containing = zones.filter((it) => it.overlay.price_low <= currentPrice && it.overlay.price_high >= currentPrice)
+    if (containing.length) {
+      containing.forEach((it) => out.set(it.overlay.id, 'primary'))
+    } else {
+      for (const side of ['above', 'below']) {
+        const candidates = zones.filter((it) => (side === 'above' ? it.overlay.price_low > currentPrice : it.overlay.price_high < currentPrice))
+        const dist = (it) => (side === 'above' ? it.overlay.price_low - currentPrice : currentPrice - it.overlay.price_high)
+        const pick = (list) => [...list].sort((a, b) => dist(a) - dist(b) || a.overlay.id.localeCompare(b.overlay.id))[0]
+        const best = pick(candidates.filter((it) => !it.htf)) || pick(candidates)
+        if (best) out.set(best.overlay.id, 'primary')
+      }
+    }
+  }
+  return out
+}
+
+export const EMPHASIS_STYLE = {
+  primary: { alpha: 1, fill: 1.35, width: 0.4 },
+  secondary: { alpha: 0.55, fill: 0.7, width: 0 },
+  historical: { alpha: 1, fill: 1, width: 0 }, // lifecycle style already fades these
+}
+
+/** Short scenario name for on-chart labels (full name stays in the tooltip). */
+export function shortScenarioName(name) {
+  const text = String(name || '').replace(/^CONDITIONAL · /, '').replace(/_/g, ' ')
+  return text.length > 22 ? `${text.slice(0, 21)}…` : text
 }

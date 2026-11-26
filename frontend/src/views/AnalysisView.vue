@@ -49,6 +49,7 @@ const emit = defineEmits(['retry'])
       :selected-scenario="analysisData?.selected_scenario"
       :overlay-payload="analysisData?.chart_overlays"
       :generated-at="analysisData?.generated_at_utc"
+      :analysis-candle="analysisData?.latest_candle"
       :market-bias="analysisData?.market_bias"
       :scenarios="analysisData?.scenarios"
     />

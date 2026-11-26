@@ -30,8 +30,11 @@ import {
   visibleOverlays,
 } from '../utils/chartOverlays'
 import {
+  EMPHASIS_STYLE,
   MUTED_FACTOR,
   SCENARIO_TIER_STYLE,
+  assignEmphasis,
+  shortScenarioName,
   buildConfluence,
   confluenceLabel,
   layoutLabelsCached,
@@ -58,6 +61,11 @@ const props = defineProps({
   },
   generatedAt: {
     type: String,
+    default: null,
+  },
+  // Latest closed candle the analysis used (MT5 server time).
+  analysisCandle: {
+    type: Object,
     default: null,
   },
   marketBias: {
@@ -156,9 +164,16 @@ function resetView() {
 }
 const visibleRange = ref(null) // price range of the last render (for Relevant Only)
 
+// Stale = the analysis is older than the market data the chart shows. Both
+// timestamps come from the MT5 feed, so a wrong server or browser clock cannot
+// make fresh analysis look stale (generated_at_utc uses the server clock).
 const isStale = computed(() => {
-  const ts = Date.parse(chartStore.generatedAt || '')
-  return Number.isFinite(ts) && now.value - ts > STALE_AFTER_MS
+  const analysisT = Date.parse(props.analysisCandle?.time_utc || '')
+  const times = candles.value.map((c) => Date.parse(c.time_utc)).filter(Number.isFinite)
+  if (!Number.isFinite(analysisT) || !times.length) return false
+  const latest = Math.max(...times)
+  const bar = times.length > 1 ? times[times.length - 1] - times[times.length - 2] : 0
+  return latest - analysisT > STALE_AFTER_MS + bar
 })
 const offTimeframeHighlights = computed(() => highlightedTimeframes(activeTf.value))
 const hasAiDrawings = computed(
@@ -692,16 +707,19 @@ function timeIndex(times, t) {
 // groups. Anchors are market coordinates; only screen offsets change.
 // priority: 3 = primary scenario / trade plan / highlighted, 2 = events,
 // callouts, active zones, 1 = everything else.
-function placeLabel(geom, text, x, y, { align = 'right', font = '9px monospace', color, tag = false, priority = 1, key, kind = 'text', anchor = null, ids = [] } = {}) {
+function placeLabel(geom, text, x, y, { align = 'right', font = '9px monospace', color, tag = false, priority = 1, key, kind = 'text', anchor = null, ids = [], lines = null } = {}) {
+  if (priority <= 0) return false // historical: no on-chart label (hover / Objects only)
   const { ctx } = geom
   ctx.save()
-  ctx.font = tag || kind === 'callout' ? 'bold 9px monospace' : font
-  const w = ctx.measureText(text).width + (tag || kind === 'callout' ? 10 : 2)
+  ctx.font = lines || tag || kind === 'callout' ? 'bold 9px monospace' : font
+  const w = lines
+    ? Math.max(...lines.map((l) => ctx.measureText(l).width)) + 10
+    : ctx.measureText(text).width + (tag || kind === 'callout' ? 10 : 2)
   ctx.restore()
   geom.labelReqs.push({
     key: key || `${text}@${Math.round(x)},${Math.round(y)}`,
-    text, x, y, w, h: tag || kind === 'callout' ? 14 : 11, align, font, color, tag, kind, anchor, ids,
-    priority, alpha: ctx.globalAlpha,
+    text, x, y, w, h: lines ? lines.length * 11 + 4 : tag || kind === 'callout' ? 14 : 11,
+    align, font, color, tag, kind, anchor, ids, lines, priority, alpha: ctx.globalAlpha,
   })
   return true
 }
@@ -716,7 +734,22 @@ function flushLabels(geom) {
     ctx.globalAlpha = r.alpha
     ctx.shadowBlur = 0
     ctx.setLineDash([])
-    if (r.kind === 'callout') {
+    if (r.lines) {
+      // Compact multi-line block (confluence): dark plate, thin border.
+      ctx.fillStyle = 'rgba(11, 16, 32, 0.6)' // see-through: candles stay visible
+      ctx.fillRect(rect.l, rect.t, rect.r - rect.l, rect.b - rect.t)
+      ctx.strokeStyle = r.color
+      ctx.globalAlpha = r.alpha * 0.8
+      ctx.strokeRect(rect.l + 0.5, rect.t + 0.5, rect.r - rect.l - 1, rect.b - rect.t - 1)
+      ctx.globalAlpha = r.alpha
+      ctx.fillStyle = r.color
+      ctx.textAlign = 'left'
+      r.lines.forEach((line, i) => {
+        ctx.font = i === 0 ? 'bold 9px monospace' : '9px monospace'
+        ctx.fillText(line, rect.l + 5, rect.t + 11 + i * 11)
+      })
+      if (r.ids.length) geom.hits.push({ o: r.owner || { id: r.key, visualOnly: 'group', kind: 'label', timeframe: '', name: r.lines[0], status: '', meta: { text: r.lines.join(' · ') }, memberIds: r.ids }, type: 'rect', ...rect, priority: 3 })
+    } else if (r.kind === 'callout') {
       if (r.anchor) {
         ctx.strokeStyle = r.color
         ctx.globalAlpha = r.alpha * 0.7
@@ -822,7 +855,11 @@ function drawOverlay(geom, item, highlighted) {
   const tfTag = htf ? `${o.timeframe} · ` : ''
   const label = `${tfTag}${o.name}`
   const fmt = (p) => fmtPrice(p)
-  const priority = highlighted || o.layer === 'trade_plan' ? 3 : o.meta?.key && !FADED_STATUSES.has(o.status) ? 2 : 1
+  // Visual hierarchy: PRIMARY labels always placed, SECONDARY compact/grouped,
+  // HISTORICAL without on-chart label (hover / Object Manager only).
+  const emph = item.emph || 'secondary'
+  const priority = highlighted || emph === 'primary' ? 3 : emph === 'historical' ? 0 : 1
+  const eventPriority = highlighted || emph === 'primary' ? 3 : emph === 'historical' ? 0 : 2
   const ids = [o.id]
   const style = item.style
 
@@ -837,12 +874,13 @@ function drawOverlay(geom, item, highlighted) {
       const consolidated = geom.consolidated?.has(o.id) && !highlighted
       const gain = FILL_GAIN[o.color] ?? 1
       const fill = ({ premium: 0.06, discount: 0.06, supply: 0.1, demand: 0.1, fvg: 0.16, ob: 0.2 }[type] ?? 0.12)
-        * style.fill * gain * (consolidated ? 0.35 : 1)
+        * style.fill * gain * (consolidated ? 0.35 : 1) * (EMPHASIS_STYLE[emph]?.fill ?? 1)
       ctx.fillStyle = FILL_COLOR[o.color] || color
       ctx.globalAlpha = Math.min(1, base * (highlighted ? fill + 0.14 : fill))
       ctx.fillRect(x1, yTop, w, yBottom - yTop)
       ctx.fillStyle = color
       ctx.globalAlpha = base * (consolidated ? 0.5 : 1)
+      if (emph === 'primary') ctx.lineWidth += EMPHASIS_STYLE.primary.width
       if (type === 'fvg') {
         // Imbalance: top/bottom edges + dashed midline (no side borders).
         ctx.beginPath()
@@ -870,9 +908,10 @@ function drawOverlay(geom, item, highlighted) {
       // Consolidated members: the confluence band carries the label (inspect via hover).
       if (!consolidated && (!minimal || highlighted || type === 'fvg' || type === 'ob')) {
         const short = type === 'fvg' ? 'FVG' : type === 'ob' ? 'OB' : (SHORT_NAME[type] || o.name)
-        const life = o.status === 'active' ? (o.meta?.fresh === true ? 'fresh' : 'active') : o.status
+        // Compact: lifecycle suffix only when it adds information.
+        const suffix = o.status !== 'active' ? ` · ${o.status}` : emph === 'primary' && o.meta?.fresh === true ? ' · fresh' : ''
         const text = ['fvg', 'ob', 'supply', 'demand'].includes(type)
-          ? `${tfTag}${o.color === 'bullish' ? '▲' : '▼'} ${short} · ${life}`
+          ? `${tfTag}${o.color === 'bullish' ? '▲' : '▼'} ${short}${suffix}`
           : label
         // Inside the zone, top-left: stays with the zone when zooming/panning.
         placeLabel(geom, text, Math.max(padding.left + 2, x1 + 4), yTop + 10, {
@@ -900,8 +939,7 @@ function drawOverlay(geom, item, highlighted) {
         break
       }
       if (type === 'choch') ctx.setLineDash([4, 3])
-      if (type === 'eq') ctx.setLineDash([6, 2, 1, 2])
-      if (['bsl', 'ssl'].includes(type)) ctx.setLineDash([1, 3])
+      if (type === 'eq') ctx.setLineDash([])
       ctx.beginPath()
       ctx.moveTo(x1, y)
       ctx.lineTo(x2, y)
@@ -916,7 +954,7 @@ function drawOverlay(geom, item, highlighted) {
         ctx.closePath(); ctx.fill()
         const up = o.name.includes('↑')
         placeLabel(geom, `${tfTag}${type === 'bos' ? 'BOS' : 'CHoCH'}`, (x1 + x2) / 2, up ? y - 3 : y + 11, {
-          align: 'center', color, priority: highlighted ? 3 : 2, key: o.id, ids, font: 'bold 9px monospace',
+          align: 'center', color, priority: eventPriority, key: o.id, ids, font: 'bold 9px monospace',
         })
       } else if (type === 'eq') {
         placeLabel(geom, `${tfTag}EQ 50%`, x2 - 4, y - 3, { color, priority: 1, key: o.id, ids })
@@ -929,7 +967,11 @@ function drawOverlay(geom, item, highlighted) {
       } else if (highlighted || o.layer === 'trade_plan') {
         placeLabel(geom, `${label} ${fmt(o.price)}`, x2 - 2, y - 9, { color, tag: true, priority: 3, key: o.id, ids })
       } else if (!minimal) {
-        placeLabel(geom, `${tfTag}${SHORT_NAME[type] || o.name}`, x2 - 4, y - 3, { color, priority, key: o.id, ids })
+        // Liquidity labels sit at their origin (the swing), keeping the right edge clear.
+        const atOrigin = type === 'bsl' || type === 'ssl'
+        placeLabel(geom, `${tfTag}${SHORT_NAME[type] || o.name}`, atOrigin ? Math.max(padding.left + 2, x1 + 4) : x2 - 4, y - 3, {
+          color, priority, key: o.id, ids, align: atOrigin ? 'left' : 'right',
+        })
       }
       break
     }
@@ -953,7 +995,6 @@ function drawOverlay(geom, item, highlighted) {
         ctx.globalAlpha = base * 0.18
         ctx.fillRect(x1, Math.min(y1, y2) - 3, x2 - x1, Math.abs(y2 - y1) + 6)
         ctx.globalAlpha = base
-        ctx.setLineDash([1, 3])
       }
       ctx.beginPath()
       ctx.moveTo(x1, y1)
@@ -999,6 +1040,9 @@ function drawOverlay(geom, item, highlighted) {
       break
     }
     case 'callout': {
+      if (!highlighted && !(o.meta?.sources || []).some((id) => geom.emphasis?.get(id) === 'primary')) break
+      // Structure events already carry their own BOS/CHoCH label on the chart.
+      if (!highlighted && o.id.includes(':callout:event:')) break
       const ax = timeToX(geom, o.time_start) ?? right - 4
       const ay = getY(o.price)
       const text = `${tfTag}${o.name}`
@@ -1010,55 +1054,64 @@ function drawOverlay(geom, item, highlighted) {
       break
     }
     case 'scenario': {
-      // The engine gives trigger + invalidation LEVELS only (no time, no path),
-      // so no trajectory is drawn: trigger area, direction marker, invalidation
-      // line and the required condition, in the projection space after the
-      // last candle. Clearly separate from historical candles.
+      // The engine gives trigger + invalidation LEVELS only (no time, no path):
+      // no trajectory is drawn. Conditional space after the last candle.
       if (!geom.future) break
       const tier = SCENARIO_TIER_STYLE[o.meta?.tier] || SCENARIO_TIER_STYLE.secondary
-      const factor = o.meta?.muted ? MUTED_FACTOR : 1
+      const strong = o.meta?.tier === 'primary' || o.meta?.tier === 'unranked'
       const lastIdx = geom.allCandles.length - 1
       const x0 = indexToX(geom, lastIdx) + geom.candleSpacing
       const xm = indexToX(geom, lastIdx + Math.max(2, geom.future - 3))
       const [, b] = o.points
       const y1 = getY(b.price)
-      ctx.globalAlpha *= tier.alpha * factor
+      const dir = o.color === 'bearish' ? 1 : -1
+      if (y1 < padding.top || y1 > geom.height - padding.bottom) {
+        // Trigger outside the visible price range: keep the scenario visible as
+        // an edge tag (no band drawn off-screen).
+        if (strong) {
+          const above = y1 < padding.top
+          placeLabel(geom, `${above ? '▲' : '▼'} ${tier.label} ${shortScenarioName(o.name)} · trigger ${fmt(b.price)}`, right - 4,
+            above ? padding.top + 14 : geom.height - padding.bottom - 4, { color, tag: true, priority: 3, key: o.id, ids })
+        }
+        break
+      }
+      ctx.globalAlpha *= tier.alpha * (o.meta?.muted ? MUTED_FACTOR : 1) * (strong ? 1 : 0.75)
       ctx.lineWidth = tier.width
-      // Projection-space divider (conditional area starts here).
-      ctx.save(); ctx.globalAlpha *= 0.4; ctx.setLineDash([1, 4])
-      ctx.beginPath(); ctx.moveTo(x0 - geom.candleSpacing / 2, padding.top); ctx.lineTo(x0 - geom.candleSpacing / 2, geom.height - padding.bottom); ctx.stroke()
-      ctx.restore()
-      // Trigger area: band at the trigger level.
+      if (strong) {
+        // Conditional area: subtle shade, separate from price history.
+        ctx.save()
+        ctx.globalAlpha = 0.035
+        ctx.fillStyle = PALETTE.bull
+        ctx.fillRect(x0 - geom.candleSpacing / 2, padding.top, right - x0 + geom.candleSpacing / 2, geom.height - padding.top - padding.bottom)
+        ctx.restore()
+      }
+      // Trigger zone.
       const base = ctx.globalAlpha
       ctx.fillStyle = FILL_COLOR[o.color] || color
-      ctx.globalAlpha = Math.min(1, base * 0.22 * (FILL_GAIN[o.color] ?? 1))
-      ctx.fillRect(x0, y1 - 4, right - x0, 8)
+      ctx.globalAlpha = Math.min(1, base * (strong ? 0.35 : 0.16) * (FILL_GAIN[o.color] ?? 1))
+      ctx.fillRect(x0, y1 - (strong ? 5 : 3), right - x0, strong ? 10 : 6)
       ctx.globalAlpha = base
       ctx.fillStyle = color
-      ctx.setLineDash([4, 3])
       ctx.beginPath(); ctx.moveTo(x0, y1); ctx.lineTo(right, y1); ctx.stroke()
-      ctx.setLineDash([])
-      // Direction marker supported by the scenario's own direction.
-      const dir = o.color === 'bearish' ? 1 : -1
-      ctx.beginPath()
-      ctx.moveTo(xm - 5, y1 + dir * 6); ctx.lineTo(xm, y1 + dir * 14); ctx.lineTo(xm + 5, y1 + dir * 6)
-      ctx.stroke()
+      // Direction (the scenario's own direction), not a price target.
+      const len = strong ? 26 : 14
+      ctx.beginPath(); ctx.moveTo(xm, y1 + dir * 4); ctx.lineTo(xm, y1 + dir * len); ctx.stroke()
+      drawLineArrow(ctx, xm, y1 + dir * 4, xm, y1 + dir * len, strong ? 7 : 5)
       const inval = o.meta?.invalidation_price
       if (typeof inval === 'number') {
         const yi = getY(inval)
-        ctx.setLineDash([1, 3])
+        ctx.save()
+        ctx.globalAlpha = base * (strong ? 0.9 : 0.45)
+        ctx.strokeStyle = OVERLAY_COLORS.stop
+        ctx.setLineDash([5, 3])
         ctx.beginPath(); ctx.moveTo(x0, yi); ctx.lineTo(right, yi); ctx.stroke()
-        ctx.setLineDash([])
-        placeLabel(geom, `✕ invalid beyond ${fmt(inval)}`, right - 4, yi - 3, { color, priority: 1, key: `${o.id}:inval`, ids })
+        ctx.restore()
+        if (strong) {
+          placeLabel(geom, `✕ ${fmt(inval)}`, right - 4, yi - 3, { color: OVERLAY_COLORS.stop, priority: 3, key: `${o.id}:inval`, ids })
+        }
       }
-      const strong = o.meta?.tier === 'primary' || o.meta?.tier === 'unranked'
-      const conv = o.meta?.conviction ? ` · ${String(o.meta.conviction).toUpperCase()}` : ''
-      placeLabel(geom, `${tier.label} · ${o.name}${conv}`, right - 4, y1 + (dir > 0 ? -8 : 16), {
-        color, tag: strong && !o.meta?.muted, priority: strong ? 3 : 1, key: o.id, ids,
-      })
-      const needs = o.meta?.trigger ? String(o.meta.trigger).replace(/_/g, ' ') : `trigger ${fmt(b.price)}`
-      placeLabel(geom, `requires: ${needs.length > 60 ? `${needs.slice(0, 57)}…` : needs}`, right - 4, y1 + (dir > 0 ? -22 : 30), {
-        color, priority: strong ? 2 : 1, key: `${o.id}:needs`, ids, font: '9px sans-serif',
+      placeLabel(geom, `${tier.label} ${o.color === 'bearish' ? '▼' : '▲'} ${shortScenarioName(o.name)}`, right - 4, y1 + (dir > 0 ? -9 : 17), {
+        color, tag: strong, priority: strong ? 3 : 1, key: o.id, ids,
       })
       item.seg = [x0, y1, right, y1]
       break
@@ -1085,9 +1138,9 @@ function drawOverlay(geom, item, highlighted) {
         ctx.closePath()
         ctx.fill()
       }
-      if (!minimal || highlighted || (item.swingRank ?? 0) < 2 || o.shape === 'circle') {
+      if (highlighted || o.shape === 'circle' || (item.swingRank ?? 0) < 2) {
         placeLabel(geom, label, x, up ? y - 12 : y + 19, {
-          align: 'center', color, priority: o.shape === 'circle' ? 2 : (item.swingRank ?? 0) < 2 ? 2 : 1, key: o.id, ids,
+          align: 'center', color, priority: highlighted ? 3 : o.shape === 'circle' ? eventPriority : (item.swingRank ?? 0) === 0 ? 2 : 1, key: o.id, ids,
           font: highlighted ? 'bold 10px monospace' : '9px monospace',
         })
       }
@@ -1095,13 +1148,8 @@ function drawOverlay(geom, item, highlighted) {
     }
     case 'label': {
       const y = getY(o.price)
-      placeLabel(geom, label, right - 4, y, { color, tag: true, priority: 3, key: o.id, ids })
-      const blocker = o.meta?.blockers?.[0]
-      if (blocker) {
-        placeLabel(geom, blocker.length > 70 ? `${blocker.slice(0, 67)}…` : blocker, right - 4, y + 15, {
-          color, font: '9px sans-serif', priority: 2, key: `${o.id}:blocker`, ids,
-        })
-      }
+      // Compact on-chart tag; the blockers are in the tooltip and the Trade Plan panel.
+      placeLabel(geom, String(o.name).split(' · ')[0], right - 4, y, { color, tag: true, priority: 3, key: o.id, ids })
       break
     }
     case 'position': {
@@ -1158,7 +1206,7 @@ function overlayPrices(o) {
 // Draw order inside a pass: background zones first, HTF before current TF,
 // highlighted last so they stay on top.
 function drawPriority(item, highlightedIds) {
-  return (highlightedIds.has(item.overlay.id) ? 10 : 0) + (item.htf ? 0 : 5)
+  return (highlightedIds.has(item.overlay.id) ? 10 : 0) + (item.htf ? 0 : 5) + (item.emph === 'primary' ? 4 : 0)
     + (item.overlay.layer === 'premium_discount' ? -3 : 0) + (item.overlay.kind === 'scenario' ? 8 : 0)
 }
 
@@ -1179,16 +1227,17 @@ function drawConfluence(geom, groups) {
       yTop = mid - 2
       yBottom = mid + 2
     }
+    const primaryBand = g.memberIds.some((id) => geom.emphasis?.get(id) === 'primary')
+    const staleF = isStale.value ? 0.5 : 1
     ctx.save()
-    ctx.globalAlpha = isStale.value ? 0.5 : 1
     ctx.fillStyle = CONFLUENCE_COLOR
-    ctx.globalAlpha *= 0.12
+    ctx.globalAlpha = staleF * (primaryBand ? 0.16 : 0.07)
     ctx.fillRect(x1, yTop, right - x1, yBottom - yTop)
-    ctx.globalAlpha = isStale.value ? 0.5 : 0.9
+    ctx.globalAlpha = staleF * (primaryBand ? 0.9 : 0.4)
     ctx.strokeStyle = CONFLUENCE_COLOR
     ctx.lineWidth = 1
     ctx.strokeRect(x1, yTop, right - x1, yBottom - yTop)
-    ctx.strokeRect(x1 + 2, yTop + 2, Math.max(0, right - x1 - 4), Math.max(0, yBottom - yTop - 4))
+    if (primaryBand) ctx.strokeRect(x1 + 2, yTop + 2, Math.max(0, right - x1 - 4), Math.max(0, yBottom - yTop - 4))
     ctx.restore()
     const pseudo = {
       id: g.id, visualOnly: 'confluence', kind: 'zone', timeframe: g.timeframes.join(','),
@@ -1200,8 +1249,11 @@ function drawConfluence(geom, groups) {
       memberIds: g.memberIds,
     }
     geom.hits.push({ o: pseudo, type: 'rect', l: x1, r: right, t: yTop, b: yBottom, priority: 1 })
-    placeLabel(geom, confluenceLabel(g), right - 4, yBottom + 11, {
-      color: CONFLUENCE_COLOR, priority: 2, key: g.id, ids: g.memberIds, font: 'bold 9px monospace',
+    // "SUPPLY CONFLUENCE" / "H4 + H1 · OB + FVG", at the band's start (left).
+    const [title, ...rest] = confluenceLabel(g).split(' · ')
+    placeLabel(geom, title, Math.max(padding.left + 4, x1 + 4), yTop - 3, {
+      align: 'left', color: CONFLUENCE_COLOR, priority: primaryBand ? 3 : 2, key: g.id, ids: g.memberIds,
+      lines: [title, rest.join(' · ')],
     })
   }
 }
@@ -1219,6 +1271,9 @@ function drawOverlays(geom, items, phase) {
   ctx.clip()
 
   if (phase === 'under') {
+    const last = geom.allCandles[geom.allCandles.length - 1]
+    geom.emphasis = assignEmphasis(items, { currentPrice: last?.close })
+    for (const it of items) it.emph = geom.emphasis.get(it.overlay.id)
     geom.consolidated = new Set()
     if (tfPrefs.value.confluence) {
       const groups = buildConfluence(items, overlayType)
@@ -1246,7 +1301,8 @@ function drawOverlays(geom, items, phase) {
     const oldSwing = (item.swingRank ?? 0) >= 2
     item.style = lifecycleStyle(o.status, { historical: oldSwing && !highlighted })
     ctx.save()
-    ctx.globalAlpha = item.style.alpha * (isStale.value ? 0.5 : 1) * (item.htf ? 0.6 : 1) * (highlighted ? 1 : 0.92)
+    ctx.globalAlpha = item.style.alpha * (isStale.value ? 0.5 : 1) * (item.htf ? 0.6 : 1)
+      * (highlighted ? 1 : (EMPHASIS_STYLE[item.emph]?.alpha ?? 1))
     ctx.strokeStyle = color
     ctx.fillStyle = color
     ctx.lineWidth = highlighted ? 2.4 : item.htf ? 1 : item.style.width
@@ -1269,7 +1325,7 @@ function drawOverlays(geom, items, phase) {
       const above = overlayPrices(o)[0] > chartMax
       placeLabel(
         geom,
-        `${above ? '▲' : '▼'} ${o.name} ${fmtPrice(overlayPrices(o)[0])}`,
+        `${above ? '▲' : '▼'} ${o.layer === 'trade_plan' ? String(o.name).split(' · ')[0] : o.name} ${fmtPrice(overlayPrices(o)[0])}`,
         width - padding.right - 4,
         above ? top + 14 : bottom - 4,
         { color: OVERLAY_COLORS[o.color] || OVERLAY_COLORS.neutral, tag: true, priority: 3, key: `edge:${o.id}`, ids: [o.id] }

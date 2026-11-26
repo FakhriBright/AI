@@ -632,6 +632,10 @@ export function buildDerived({ symbol, marketBias, scenarios, currentPrice, sele
         trigger: sc.trigger, invalidation: sc.invalidation,
         invalidation_price: typeof sc.invalidation_reference === 'number' ? sc.invalidation_reference : null,
         conviction: sc.conviction, confirmed: Boolean(sc.trigger_confirmed),
+        text: [
+          sc.trigger ? `requires: ${String(sc.trigger).replace(/_/g, ' ')}` : `trigger ${sc.trigger_reference}`,
+          sc.invalidation ? `invalid: ${String(sc.invalidation).replace(/_/g, ' ')}` : null,
+        ].filter(Boolean).join(' · '),
         tier: rank?.tier || 'secondary', muted: Boolean(rank?.muted), rank: rank?.rank,
         rank_reasons: rank?.reasons || [],
       },
