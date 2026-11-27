@@ -9,6 +9,7 @@ from app.services.technical.trend import analyze_trend
 
 from app.services.analysis.candles import (
     get_closed_candles,
+    learn_session_reopen_minutes,
     select_analysis_candles,
     validate_candle_series,
 )
@@ -37,15 +38,24 @@ async def build_analysis_snapshot(
         generated_at_utc=datetime.now(timezone.utc),
     )
 
-    for timeframe in TIMEFRAMES:
-
-        candles = await provider.get_candles(
+    fetched = {
+        timeframe: await provider.get_candles(
             symbol=symbol,
             timeframe=timeframe,
             count=count,
         )
+        for timeframe in TIMEFRAMES
+    }
+    # The symbol's regular reopen time(s), learned from its own H1 history in
+    # this same request: lets the gap check accept a holiday early close that
+    # resumes at the normal reopen, while real data outages are still rejected.
+    reopen_minutes = learn_session_reopen_minutes(fetched.get("H1") or [], "H1")
 
-        validate_candle_series(candles, timeframe)
+    for timeframe in TIMEFRAMES:
+
+        candles = fetched[timeframe]
+
+        validate_candle_series(candles, timeframe, session_reopen_minutes=reopen_minutes)
 
         analysis_candles = select_analysis_candles(
             candles,

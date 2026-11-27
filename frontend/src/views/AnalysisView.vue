@@ -11,6 +11,8 @@ import ScenarioPanel from '../components/ScenarioPanel.vue'
 const props = defineProps({
   symbol: { type: String, default: 'XAUUSDm' },
   analysisData: { type: Object, default: null },
+  // Reason the latest GET /analysis failed (backend detail), '' when it succeeded.
+  analysisError: { type: String, default: '' },
   liveTick: { type: Object, default: null },
   isBridgeOffline: { type: Boolean, default: false },
 })
@@ -35,6 +37,17 @@ const emit = defineEmits(['retry'])
     <div v-if="isBridgeOffline" class="mt5-offline-banner">
       <div>
         <strong>MT5 OFFLINE:</strong> Live market data feed unavailable. Start the MT5 Bridge on Windows host to stream live data.
+      </div>
+      <button class="btn btn-secondary btn-sm" @click="emit('retry')">
+        Retry
+      </button>
+    </div>
+
+    <!-- Analysis request failed: show the backend's reason (no silent empty panels) -->
+    <div v-if="analysisError" class="mt5-offline-banner">
+      <div>
+        <strong>ANALYSIS UNAVAILABLE:</strong> {{ analysisError }}
+        <span v-if="analysisData"> Showing the last successful analysis ({{ analysisData.generated_at_utc?.slice(11, 16) }} UTC).</span>
       </div>
       <button class="btn btn-secondary btn-sm" @click="emit('retry')">
         Retry

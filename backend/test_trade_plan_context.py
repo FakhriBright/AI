@@ -121,20 +121,28 @@ async def test_symbol(provider, symbol):
 
         info = await provider.symbol_info(symbol)
 
-        risk_plan = calculate_risk(
-            RiskRequest(
-                symbol=symbol,
-                account_equity=1000.0,
-                risk_percent=1.0,
-                entry_price=stop_plan.entry_price,
-                stop_price=stop_plan.stop_price,
-            ),
-            tick_size=info.tick_size,
-            tick_value=info.tick_value,
-            volume_min=info.volume_min,
-            volume_max=info.volume_max,
-            volume_step=info.volume_step,
-        )
+        # Same handling as the live pipeline: a risk guard refusal (e.g. the
+        # broker minimum lot exceeds the fixed test risk budget) leaves the plan
+        # at "confirmed_needs_risk" with the reason, it does not crash.
+        risk_error = None
+        try:
+            risk_plan = calculate_risk(
+                RiskRequest(
+                    symbol=symbol,
+                    account_equity=1000.0,
+                    risk_percent=1.0,
+                    entry_price=stop_plan.entry_price,
+                    stop_price=stop_plan.stop_price,
+                ),
+                tick_size=info.tick_size,
+                tick_value=info.tick_value,
+                volume_min=info.volume_min,
+                volume_max=info.volume_max,
+                volume_step=info.volume_step,
+            )
+        except ValueError as exc:
+            risk_plan, risk_error = None, str(exc)
+            print(f"NO RISK PLAN : {scenario.name}: {risk_error}")
 
         selected_plan = build_trade_plan(
             symbol=symbol,
@@ -142,6 +150,7 @@ async def test_symbol(provider, symbol):
             confirmation=result,
             stop_plan=stop_plan,
             risk_plan=risk_plan,
+            risk_error=risk_error,
             bias=bias,
             context=context,
             levels=levels,

@@ -66,14 +66,56 @@ class MarketDataInvalid(ValueError):
 # Forex pairs (EURUSD...) trade 24h and never show this gap.
 DAILY_BREAK_MAX_GAP_SEC = 90 * 60
 
+# Holiday early closes (e.g. US Thanksgiving: gold closed ~19:30 -> 23:00 UTC)
+# are longer than the daily break. They are accepted only when trading resumes
+# at the symbol's REGULAR reopen time, learned from its own history; a data
+# outage resumes at an arbitrary time and is still rejected.
+SESSION_CLOSURE_MAX_GAP_SEC = 24 * 3600
+REOPEN_TOLERANCE_SEC = 5 * 60
+REOPEN_MIN_OCCURRENCES = 2
 
-def is_market_closure_gap(t1: datetime, t2: datetime) -> bool:
+
+def _minute_of_day(t: datetime) -> int:
+    return t.hour * 60 + t.minute
+
+
+def learn_session_reopen_minutes(candles: list, timeframe: str) -> set[int]:
+    """UTC minutes-of-day at which the symbol regularly resumes trading after a
+    break (a gap longer than one bar), seen at least REOPEN_MIN_OCCURRENCES
+    times in this series. Empty for instruments that trade continuously."""
+    step = TIMEFRAME_MINUTES.get(timeframe, 60) * 60
+    seen: dict[int, int] = {}
+    for previous, current in zip(candles, candles[1:]):
+        t1, t2 = previous.time_utc, current.time_utc
+        if t1.tzinfo is None:
+            t1 = t1.replace(tzinfo=timezone.utc)
+        if t2.tzinfo is None:
+            t2 = t2.replace(tzinfo=timezone.utc)
+        if (t2 - t1).total_seconds() > step:
+            minute = _minute_of_day(t2)
+            seen[minute] = seen.get(minute, 0) + 1
+    return {minute for minute, count in seen.items() if count >= REOPEN_MIN_OCCURRENCES}
+
+
+def _resumes_at_reopen(t2: datetime, reopen_minutes: set[int]) -> bool:
+    minute = _minute_of_day(t2)
+    return any(0 <= (minute - r) % 1440 <= REOPEN_TOLERANCE_SEC // 60 for r in reopen_minutes)
+
+
+def is_market_closure_gap(
+    t1: datetime,
+    t2: datetime,
+    session_reopen_minutes: set[int] | None = None,
+) -> bool:
     """
     Returns True if the gap between t1 and t2 represents a normal market closure:
     - the weekend closure, or
-    - the short (<= 90 min) weekday daily break of metals/indices.
+    - the short (<= 90 min) weekday daily break of metals/indices, or
+    - a longer weekday session closure (holiday early close, < 24 h) that
+      resumes exactly at the symbol's regular reopen time (learned from its
+      own history and passed in as `session_reopen_minutes`).
 
-    Longer intra-session gaps are still rejected as abnormal.
+    Other intra-session gaps are still rejected as abnormal.
     """
     gap_sec = (t2 - t1).total_seconds()
     if gap_sec <= 0 or gap_sec > (72 * 3600):
@@ -90,6 +132,15 @@ def is_market_closure_gap(t1: datetime, t2: datetime) -> bool:
     if w1 in (3, 4, 5) and w2 in (6, 0):
         return True
 
+    # Session closure (early close) that ends at the regular reopen time.
+    if (
+        session_reopen_minutes
+        and w1 <= 4
+        and gap_sec < SESSION_CLOSURE_MAX_GAP_SEC
+        and _resumes_at_reopen(t2, session_reopen_minutes)
+    ):
+        return True
+
     return False
 
 
@@ -99,6 +150,7 @@ def validate_candle_series(
     max_gap_multiplier: float = 20.0,
     max_stale_hours: float = 72.0,
     now: datetime | None = None,
+    session_reopen_minutes: set[int] | None = None,
 ) -> None:
     if not candles:
         raise MarketDataInvalid(f"No candles provided for timeframe {timeframe}")
@@ -143,7 +195,7 @@ def validate_candle_series(
             raise MarketDataInvalid(f"Out of order timestamps in candle series for {timeframe}: {t1} > {t2}")
 
         if gap_sec > max_allowed_gap_sec:
-            if not is_market_closure_gap(t1, t2):
+            if not is_market_closure_gap(t1, t2, session_reopen_minutes):
                 raise MarketDataInvalid(
                     f"Abnormal gap detected in {timeframe} candles between {t1.isoformat()} and {t2.isoformat()} ({gap_sec / 60:.1f} min)"
                 )

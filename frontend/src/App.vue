@@ -182,7 +182,8 @@ async function fetchAnalysis() {
   } catch (err) {
     if (selectedSymbol.value !== targetSymbol) return
 
-    analysisError.value = 'Unable to load market data.'
+    // Keep the backend's own reason (e.g. 503 "Data market tidak valid: ...").
+    analysisError.value = err.message || 'Unable to load market data.'
     if (err.message && err.message.toLowerCase().includes('session expired')) {
       handleLogout()
     }
@@ -333,6 +334,7 @@ watch(loggedIn, (isAuth) => {
             :symbol="selectedSymbol"
             :symbols="symbols"
             :analysis-data="analysisData"
+            :analysis-error="analysisError"
             :live-tick="liveTick"
             :bridge-health="bridgeHealth"
             :is-bridge-offline="isBridgeOffline"
