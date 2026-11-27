@@ -25,8 +25,10 @@ def test_fvg_and_order_block_are_detected_from_closed_candles():
     result = detect_fvg_order_blocks(candles, current_price=11.8, atr=1.0)
     assert any(z["direction"] == "bullish" and z["low"] == 10.3 and z["high"] == 11.0
                for z in result["fvg"])
-    assert any(z["direction"] == "bullish" and z["low"] == 9.7 and z["high"] == 10.3
-               for z in result["order_blocks"])
+    # Rule (technical/smc.py): an order block exists only where a BOS/CHoCH
+    # broke a confirmed swing. Four candles hold no confirmed swing, so the
+    # bearish candle before the displacement is not reported as an OB.
+    assert result["order_blocks"] == []
 
 
 def test_scenario_selection_uses_evidence_not_overall_bias_alone():
@@ -115,4 +117,6 @@ def test_fvg_is_not_marked_touched_by_candle_entirely_below_zone():
     ]
     result = detect_fvg_order_blocks(candles, current_price=9.6, atr=1.0)
     bullish = next(z for z in result["fvg"] if z["direction"] == "bullish")
-    assert bullish["fresh"] is True
+    # The candle never overlaps the gap (no false "touch"/fill), but it CLOSED
+    # below the far edge, which invalidates a bullish FVG (technical/smc.py).
+    assert bullish["state"] == "invalidated" and bullish["fresh"] is False

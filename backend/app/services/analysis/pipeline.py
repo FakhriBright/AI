@@ -23,6 +23,7 @@ from app.services.analysis.scenario import Scenario, ScenarioAnalysis, build_sce
 from app.services.analysis.stop import StopPlan, StopRequest, calculate_stop
 from app.services.analysis.trade_plan import TradePlan, build_trade_plan
 from app.services.analysis.snapshot import AnalysisSnapshot
+from app.services.technical.smc import analyze as smc_analyze, point_from_digits
 from app.services.ai.base import AIResponse
 from app.services.market_data.base import Candle, MarketDataProvider
 
@@ -368,6 +369,20 @@ async def _build_deterministic(
         scenarios=scenario_analysis,
         trade_plan=trade_plan,
     )
+
+    # Deterministic ICT/SMC read per timeframe, from that timeframe's own
+    # CLOSED candles (technical/smc.py). Chart overlays and the desk brief read
+    # this; no AI is involved and no level is estimated.
+    point = point_from_digits(price_digits)
+    ai_context["smc"] = {
+        tf: smc_analyze(
+            data.evidence_candles,
+            tf,
+            current_price=levels.current_price,
+            point=point,
+        )
+        for tf, data in context.timeframes.items()
+    }
 
     det = DeterministicContext(
         snapshot=snapshot,

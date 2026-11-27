@@ -1024,8 +1024,10 @@ function drawOverlay(geom, item, highlighted) {
       // Consolidated members: the confluence band carries the label (inspect via hover).
       if (!consolidated && (!minimal || highlighted || type === 'fvg' || type === 'ob')) {
         const short = type === 'fvg' ? 'FVG' : type === 'ob' ? 'OB' : (SHORT_NAME[type] || o.name)
-        // Compact: lifecycle suffix only when it adds information.
-        const suffix = o.status !== 'active' ? ` · ${o.status}` : emph === 'primary' && o.meta?.fresh === true ? ' · fresh' : ''
+        // Compact: lifecycle suffix only when it adds information (engine state).
+        const suffix = o.status !== 'active' ? ` · ${o.status}`
+          : o.meta?.state === 'partial' && o.meta?.fill_pct != null ? ` · ${Math.round(o.meta.fill_pct)}% filled`
+            : emph === 'primary' && o.meta?.fresh === true ? ' · fresh' : ''
         const text = ['fvg', 'ob', 'supply', 'demand'].includes(type)
           ? `${tfTag}${o.color === 'bullish' ? '▲' : '▼'} ${short}${suffix}`
           : label
@@ -1072,7 +1074,8 @@ function drawOverlay(geom, item, highlighted) {
         ctx.moveTo(x2, y - 4); ctx.lineTo(x2 + 4, y); ctx.lineTo(x2, y + 4); ctx.lineTo(x2 - 4, y)
         ctx.closePath(); ctx.fill()
         const up = o.name.includes('↑')
-        placeLabel(geom, `${tfTag}${type === 'bos' ? 'BOS' : 'CHoCH'}`, (x1 + x2) / 2, up ? y - 3 : y + 11, {
+        // Label at the middle of the VISIBLE part of the connector (start may be scrolled off).
+        placeLabel(geom, `${tfTag}${type === 'bos' ? 'BOS' : 'CHoCH'}`, (Math.max(x1, padding.left) + x2) / 2, up ? y - 3 : y + 11, {
           align: 'center', color, priority: eventPriority, key: o.id, ids, font: 'bold 9px monospace',
         })
       } else if (type === 'eq') {

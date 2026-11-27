@@ -9,7 +9,7 @@ from app.services.analysis.levels import build_key_levels
 from app.services.analysis.scenario import build_scenarios
 from app.services.analysis.confirmation import confirm_scenario
 from app.services.analysis.candles import get_closed_candles
-from app.services.analysis.stop import StopRequest, calculate_stop
+from app.services.analysis.pipeline import _build_stop_plan
 from app.services.analysis.risk import RiskRequest, calculate_risk
 from app.services.analysis.trade_plan import build_trade_plan
 
@@ -112,20 +112,12 @@ async def test_symbol(provider, symbol):
         if scenario.trigger_reference is None:
             continue
 
-        atr_reference = (
-            context.timeframes["M5"].atr14
-            or context.timeframes["M15"].atr14
-        )
-
-        stop_plan = calculate_stop(
-            StopRequest(
-                direction=scenario.direction,
-                entry_price=result.entry_price,
-                trigger_reference=scenario.trigger_reference,
-                invalidation_reference=scenario.invalidation_reference,
-                atr_reference=atr_reference,
-            )
-        )
+        # Same stop rule as the live pipeline: no stop without a valid
+        # invalidation reference (it returns the reason instead of raising).
+        stop_plan, stop_error = _build_stop_plan(result, scenario)
+        if stop_plan is None:
+            print(f"NO STOP      : {scenario.name}: {stop_error}")
+            continue
 
         info = await provider.symbol_info(symbol)
 

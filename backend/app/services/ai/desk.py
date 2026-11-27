@@ -20,6 +20,8 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from app.services.technical.smc import analyze as smc_analyze
+
 TF_ORDER = ("D1", "H4", "H1", "M30", "M15", "M5", "M1")
 
 # Relevance of a timeframe when ranking candle reads.
@@ -889,104 +891,78 @@ def detect_fvg_order_blocks(
     candles: list[Any],
     current_price: float | None = None,
     atr: float | None = None,
+    smc: dict[str, Any] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Detect recent 3-candle FVGs and opposing-candle OBs deterministically.
+    """Compact FVG / order-block evidence for the desk brief.
 
-    Input candles are the compact, closed-candle evidence produced by the
-    serializer. The helper does not infer zones from AI prose or live forming
-    candles. It returns at most the latest bullish and bearish zone per type.
+    The zones come from technical/smc.py - the same detector the chart draws -
+    either the pipeline's full closed-candle read of the timeframe (`smc`) or,
+    without it, the detector run on the closed `candles` given here. Rules
+    (3-candle gap with minimum size, BOS/CHoCH-validated order blocks, fill /
+    mitigation states) are documented in smc.py. Live zones first, at most two
+    per direction, nearest first.
     """
-    rows = []
-    for candle in candles or []:
-        fields = _candle_fields(candle)
-        if fields is None:
-            continue
-        o, h, lo, c = fields
-        rows.append({
-            "time": _as_dict(candle).get("time_utc"),
-            "open": o, "high": h, "low": lo, "close": c,
-        })
+    read = smc if smc else smc_analyze(candles or [], "desk", current_price=current_price)
+    atr = atr or _num(read.get("atr"))
 
-    if len(rows) < 3:
-        return {"fvg": [], "order_blocks": []}
+    def distance(low: float, high: float) -> float | None:
+        if current_price is None or not atr:
+            return None
+        return _r(max(low - current_price, current_price - high, 0) / atr, 2)
 
-    fvgs: dict[str, dict[str, Any]] = {}
-    # Classic ICT 3-candle imbalance: candle 1 and 3 do not overlap.
-    for i in range(2, len(rows)):
-        first, middle, third = rows[i - 2], rows[i - 1], rows[i]
-        if third["low"] > first["high"]:
-            side, lower, upper = "bullish", first["high"], third["low"]
-            touched = any(
-                row["low"] <= upper and row["high"] >= lower
-                for row in rows[i + 1:]
-            )
-        elif third["high"] < first["low"]:
-            side, lower, upper = "bearish", third["high"], first["low"]
-            touched = any(
-                row["low"] <= upper and row["high"] >= lower
-                for row in rows[i + 1:]
-            )
-        else:
-            continue
-        fvgs[side] = {
-            "direction": side,
-            "low": _r(lower), "high": _r(upper),
-            "formed_at": _short_time(third["time"]),
-            "fresh": not touched,
-            "distance_atr": _r(
-                max(lower - current_price, current_price - upper, 0) / atr, 2
-            ) if current_price is not None and atr else None,
+    def pick(zones: list[dict[str, Any]], live: set[str]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for direction in ("bullish", "bearish"):
+            same = [z for z in zones if z["direction"] == direction]
+            same.sort(key=lambda z: (z["state"] not in live, distance(z["low"], z["high"]) or 999.0))
+            out += same[:2]
+        return out
+
+    fvg = [
+        {
+            "direction": z["direction"],
+            "low": _r(z["low"], 5), "high": _r(z["high"], 5),
+            "formed_at": _short_time(z["formed_time"]),
+            "state": z["state"], "fill_pct": z.get("fill_pct"),
+            "fresh": z["state"] == "fresh",
+            "distance_atr": distance(z["low"], z["high"]),
         }
-
-    order_blocks: dict[str, dict[str, Any]] = {}
-    for i in range(1, len(rows)):
-        impulse = rows[i]
-        history = rows[max(0, i - 14):i]
-        if not history:
-            continue
-        avg_body = sum(abs(c["close"] - c["open"]) for c in history) / len(history)
-        body = abs(impulse["close"] - impulse["open"])
-        if avg_body <= 0 or body < avg_body * 1.5:
-            continue
-
-        base = rows[i - 1]
-        impulse_dir = (
-            "bullish" if impulse["close"] > impulse["open"]
-            else "bearish" if impulse["close"] < impulse["open"]
-            else None
-        )
-        if impulse_dir == "bullish" and base["close"] < base["open"]:
-            side = "bullish"
-        elif impulse_dir == "bearish" and base["close"] > base["open"]:
-            side = "bearish"
-        else:
-            continue
-
-        lower, upper = base["low"], base["high"]
-        later = rows[i + 1:]
-        touched = any(
-            row["low"] <= upper and row["high"] >= lower for row in later
-        )
-        order_blocks[side] = {
-            "direction": side,
-            "low": _r(lower), "high": _r(upper),
-            "formed_at": _short_time(base["time"]),
-            "impulse_at": _short_time(impulse["time"]),
-            "fresh": not touched,
-            "distance_atr": _r(
-                max(lower - current_price, current_price - upper, 0) / atr, 2
-            ) if current_price is not None and atr else None,
+        for z in pick(read.get("fvgs") or [], {"fresh", "partial"})
+    ]
+    order_blocks = [
+        {
+            "direction": z["direction"],
+            "low": _r(z["low"], 5), "high": _r(z["high"], 5),
+            "formed_at": _short_time(z["ob_time"]),
+            "impulse_at": _short_time(z["displacement_time"]),
+            "validated_by": f"{z['break_kind']} {_short_time(z['break_time'])}",
+            "state": z["state"],
+            "fresh": z["state"] == "fresh",
+            "distance_atr": distance(z["low"], z["high"]),
         }
+        for z in pick(read.get("order_blocks") or [], {"fresh"})
+    ]
 
-    # Prefer nearest zones when price is known; otherwise retain the latest.
     def zone_order(zone: dict[str, Any]) -> tuple[float, str]:
         dist = _num(zone.get("distance_atr"))
         return (dist if dist is not None else 999.0, str(zone.get("formed_at") or ""))
 
     return {
-        "fvg": sorted(fvgs.values(), key=zone_order),
-        "order_blocks": sorted(order_blocks.values(), key=zone_order),
+        "fvg": sorted(fvg, key=zone_order),
+        "order_blocks": sorted(order_blocks, key=zone_order),
     }
+
+
+def smc_break_text(smc: dict[str, Any] | None) -> str | None:
+    """Latest structure event of the SMC read, as text for the desk brief."""
+    events = (smc or {}).get("events") or []
+    if not events:
+        return None
+    ev = events[-1]
+    return (
+        f"{ev['kind']}_{ev['direction']} (close {_r(ev['break_close'], 5)} beyond "
+        f"{ev.get('swing_label') or 'swing'} {_r(ev['level'], 5)} at {_short_time(ev['break_time'])})"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1098,7 +1074,7 @@ def build_desk_brief(ai_context: dict[str, Any]) -> dict[str, Any]:
         structure[tf] = {
             "trend": data.get("trend"),
             "structure": data.get("structure"),
-            "break": structure_break(
+            "break": smc_break_text(_as_dict(ai_context.get("smc")).get(tf)) or structure_break(
                 candles[-1] if candles else None, swings, data.get("trend")
             ),
             "swings": [
@@ -1135,6 +1111,7 @@ def build_desk_brief(ai_context: dict[str, Any]) -> dict[str, Any]:
             data.get("candles") or [],
             current_price=price,
             atr=_num(data.get("atr14")),
+            smc=_as_dict(ai_context.get("smc")).get(tf),
         )
         if zones["fvg"] or zones["order_blocks"]:
             zone_evidence[tf] = zones

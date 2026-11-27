@@ -1,26 +1,19 @@
 """Chart overlays derived from the deterministic analysis (no LLM involved).
 
-Every overlay is computed from the same `ai_context` the AI receives, using the
-engine's existing detectors, so the chart never shows something the analysis
-does not contain:
+Every overlay is a drawing of an engine result; the chart never detects
+anything itself:
 
-- swings + HH/HL/LH/LL ........ technical/structure.py (via ai_context swings)
-- BOS / CHoCH (MSS) ........... ai/desk.py structure_break
-- BSL/SSL sweep ............... ai/desk.py detect_sweep
-- FVG / Order Block ........... ai/desk.py detect_fvg_order_blocks
-- premium / equilibrium / discount  ai/desk.py premium_discount
-- support / resistance ........ analysis/levels.py (key_levels)
-- trade plan / entry gate ..... trade_plan + ai/desk.py build_entry_gate
+- swings + HH/HL/LH/LL, BOS / CHoCH, FVG, order blocks, BSL/SSL pools,
+  EQH/EQL, liquidity sweeps, premium/discount ... technical/smc.py, computed
+  per timeframe from that timeframe's CLOSED candles (`ai_context["smc"]`,
+  attached by analysis/pipeline.py). Rules are documented in smc.py.
+- trendlines ........ last two confirmed swing lows (rising) / highs (falling)
+- support / resistance ... analysis/levels.py (key_levels)
+- trade plan / entry gate ... trade_plan + ai/desk.py build_entry_gate
 
-Two objects the engine did not draw before are derived here, from engine
-swings only, and labelled as such in `source`:
-
-- equal highs/lows: consecutive same-type swings within the key-level
-  clustering tolerance used by analysis/levels.py (0.0002 below price 10,
-  otherwise 0.20)
-- trendlines: line through the last two swing lows when the later one is
-  higher (bullish), or the last two swing highs when the later one is lower
-  (bearish)
+Each overlay carries a stable id (symbol:timeframe:type:anchor time), its
+source timeframe, exact prices, start/end times and the engine state in meta.
+Unsupported concepts (IFVG, BPR, trend channels, ...) are never emitted.
 """
 
 import logging
@@ -30,21 +23,14 @@ from typing import Any
 from pydantic import ValidationError
 
 from app.schemas.chart import ChartOverlay
-from app.services.ai.desk import (
-    _r,
-    _scenario_items,
-    _short_time,
-    build_entry_gate,
-    detect_fvg_order_blocks,
-    detect_sweep,
-    premium_discount,
-    structure_break,
-)
+from app.services.ai.desk import _scenario_items, build_entry_gate
+from app.services.technical.smc import analyze as smc_analyze
 
 logger = logging.getLogger(__name__)
 
 TIMEFRAMES = ("M1", "M5", "M15", "M30", "H1", "H4", "D1")
 SR_PER_SIDE = 3
+SMC_SOURCE = "technical.smc"
 
 
 def _num(value: Any) -> float | None:
@@ -70,32 +56,9 @@ def _iso(value: Any) -> str | None:
     return dt.isoformat() if dt else None
 
 
-def _level_tolerance(price: float) -> float:
-    # Same tolerance analysis/levels.py uses to cluster key levels.
-    return 0.00020 if price < 10 else 0.20
-
-
-def _exact(desk_value: Any, exact: float | None) -> float | None:
-    """Unrounded engine price, only if it is the one desk reported.
-
-    ai/desk.py rounds zone prices to 3 decimals for the prompt, which is too
-    coarse for 5-digit FX (an EURUSD FVG collapses to zero height). The chart
-    re-reads the exact value from the same candle/swing and keeps it only if
-    it rounds back to desk's number, so both always describe the same zone.
-    """
-    if exact is None or desk_value is None or _r(exact) != desk_value:
-        return None
-    return exact
-
-
-def _candle_index(candles: list[dict[str, Any]], short: str | None) -> int | None:
-    """Map desk's truncated 'MM-DD HH:MM' time back to the exact candle."""
-    if not short:
-        return None
-    for i in range(len(candles) - 1, -1, -1):
-        if _short_time(candles[i].get("time_utc")) == short:
-            return i
-    return None
+# Engine zone state -> overlay lifecycle status (partial fill stays live).
+ZONE_STATUS = {"fresh": "active", "partial": "active", "filled": "mitigated",
+               "mitigated": "mitigated", "invalidated": "invalidated"}
 
 
 class _Builder:
@@ -106,6 +69,7 @@ class _Builder:
         self.generated_at = _iso(ai_context.get("generated_at_utc"))
         self.price = _num((ai_context.get("key_levels") or {}).get("current_price"))
         self.overlays: list[dict[str, Any]] = []
+        self._smc: dict[str, dict[str, Any]] = dict(ai_context.get("smc") or {})
 
     def add(self, **fields: Any) -> None:
         overlay = {
@@ -121,161 +85,142 @@ class _Builder:
         except ValidationError as exc:
             logger.warning("CHART_OVERLAY dropped id=%s: %s", overlay.get("id"), exc.errors()[:2])
 
+    def smc(self, tf: str, data: dict[str, Any]) -> dict[str, Any]:
+        """The engine's SMC read for this timeframe (pipeline). Contexts built
+        without it (older callers, fixtures) get the same detector run on the
+        closed candles they carry."""
+        if tf not in self._smc:
+            self._smc[tf] = smc_analyze(data.get("candles") or [], tf, current_price=self.price)
+        return self._smc[tf]
+
+    def _distance_atr(self, low: float, high: float, atr: float | None) -> float | None:
+        if self.price is None or not atr:
+            return None
+        return round(max(low - self.price, self.price - high, 0) / atr, 2)
+
     # ---------------------------------------------------------------- structure
     def structure(self, tf: str, data: dict[str, Any]) -> None:
-        swings = [s for s in data.get("swings") or [] if _num(s.get("price")) is not None]
-        candles = data.get("candles") or []
-
-        for s in swings:
+        smc = self.smc(tf, data)
+        for s in smc["swings"]:
             label = s.get("label") or ("SH" if s["type"] == "swing_high" else "SL")
             color = {"HH": "bullish", "HL": "bullish", "LH": "bearish", "LL": "bearish"}.get(label, "neutral")
             self.add(
-                id=f"swing:{s['type']}:{s.get('time_utc')}",
+                id=f"swing:{s['type']}:{s['time']}",
                 timeframe=tf, layer="structure", kind="marker",
-                name=label, color=color, price=s["price"], time_start=_iso(s.get("time_utc")),
+                name=label, color=color, status="confirmed", price=s["price"], time_start=_iso(s["time"]),
                 position="above" if s["type"] == "swing_high" else "below",
-                source="technical.structure.find_swings",
-                meta={"swing_type": s["type"]},
+                source=f"{SMC_SOURCE} swings (fractal {smc['config']['swing_lookback']})",
+                meta={"swing_type": s["type"], "confirmed_time": _iso(s.get("confirmed_time"))},
             )
 
-        if not candles:
-            return
-        last = candles[-1]
-        verdict = structure_break(last, swings, data.get("trend"))
-        kind = verdict.split(" ", 1)[0]
-        if not kind.startswith(("BOS_", "CHoCH_")):
-            return
-
-        bullish = "bullish" in kind
-        broken = next(
-            (s for s in reversed(swings) if s["type"] == ("swing_high" if bullish else "swing_low")),
-            None,
-        )
-        if broken is None:
-            return
-        is_choch = kind.startswith("CHoCH")
-        self.add(
-            id=f"break:{'choch' if is_choch else 'bos'}:{broken.get('time_utc')}",
-            timeframe=tf, layer="structure", kind="hline",
-            name=("CHoCH / MSS (candidate)" if is_choch else "BOS") + (" ↑" if bullish else " ↓"),
-            color="bullish" if bullish else "bearish",
-            status="candidate" if is_choch else "confirmed",
-            price=broken["price"],
-            time_start=_iso(broken.get("time_utc")), time_end=_iso(last.get("time_utc")),
-            source="ai.desk.structure_break",
-            meta={"verdict": verdict, "key": True},
-        )
+        for ev in smc["events"]:
+            bullish = ev["direction"] == "bullish"
+            choch = ev["kind"] == "CHoCH"
+            self.add(
+                id=f"break:{'choch' if choch else 'bos'}:{ev['swing_time']}",
+                timeframe=tf, layer="structure", kind="hline",
+                name=f"{ev['kind']} {'↑' if bullish else '↓'}",
+                color="bullish" if bullish else "bearish", status="confirmed",
+                price=ev["level"], time_start=_iso(ev["swing_time"]), time_end=_iso(ev["break_time"]),
+                source=f"{SMC_SOURCE} structure (close beyond swing)",
+                meta={
+                    "key": True, "break_time": _iso(ev["break_time"]), "break_close": ev["break_close"],
+                    "swing_label": ev.get("swing_label"), "prior_trend": ev.get("prior_trend"),
+                    "initial": ev.get("initial"),
+                    "verdict": f"{ev['kind']} {ev['direction']}: close {ev['break_close']} beyond "
+                               f"{ev.get('swing_label') or 'swing'} {ev['level']}",
+                },
+            )
 
     # ---------------------------------------------------------------- FVG / OB
     def zones(self, tf: str, data: dict[str, Any]) -> None:
-        candles = data.get("candles") or []
-        found = detect_fvg_order_blocks(candles, current_price=self.price, atr=_num(data.get("atr14")))
-
-        for zone in found["fvg"]:
-            idx = _candle_index(candles, zone.get("formed_at"))
-            if idx is None:
-                continue
-            side = zone["direction"]
-            first, third = candles[idx - 2] if idx >= 2 else None, candles[idx]
-            if first is None:
-                continue
-            if side == "bullish":
-                low, high = _exact(zone["low"], _num(first.get("high"))), _exact(zone["high"], _num(third.get("low")))
-            else:
-                low, high = _exact(zone["low"], _num(third.get("high"))), _exact(zone["high"], _num(first.get("low")))
-            if low is None or high is None:
-                logger.warning("CHART_OVERLAY fvg price mismatch tf=%s formed_at=%s", tf, zone.get("formed_at"))
-                continue
+        smc = self.smc(tf, data)
+        atr = smc.get("atr")
+        for z in smc["fvgs"]:
+            side = z["direction"]
             self.add(
-                id=f"fvg:{side}:{candles[idx].get('time_utc')}",
+                id=f"fvg:{side}:{z['formed_time']}",
                 timeframe=tf, layer="fvg", kind="zone",
-                name=f"{side.capitalize()} FVG", color="bullish" if side == "bullish" else "bearish",
-                status="active" if zone.get("fresh") else "mitigated",
-                price_low=low, price_high=high,
-                time_start=_iso(first.get("time_utc")),
-                source="ai.desk.detect_fvg_order_blocks",
-                meta={"fresh": zone.get("fresh"), "distance_atr": zone.get("distance_atr"), "key": True},
+                name=f"{side.capitalize()} FVG", color=side, status=ZONE_STATUS[z["state"]],
+                price_low=z["low"], price_high=z["high"],
+                time_start=_iso(z["start_time"]), time_end=_iso(z.get("end_time")),
+                source=f"{SMC_SOURCE} fvg (3-candle gap)",
+                meta={
+                    "key": True, "state": z["state"], "fill_pct": z.get("fill_pct"),
+                    "fresh": z["state"] == "fresh", "formed_time": _iso(z["formed_time"]),
+                    "displacement_time": _iso(z["displacement_time"]),
+                    "distance_atr": self._distance_atr(z["low"], z["high"], atr),
+                },
             )
-
-        for zone in found["order_blocks"]:
-            idx = _candle_index(candles, zone.get("formed_at"))
-            if idx is None:
-                continue
-            side = zone["direction"]
-            base = candles[idx]
-            low, high = _exact(zone["low"], _num(base.get("low"))), _exact(zone["high"], _num(base.get("high")))
-            if low is None or high is None:
-                logger.warning("CHART_OVERLAY ob price mismatch tf=%s formed_at=%s", tf, zone.get("formed_at"))
-                continue
+        for z in smc["order_blocks"]:
+            side = z["direction"]
             self.add(
-                id=f"ob:{side}:{candles[idx].get('time_utc')}",
+                id=f"ob:{side}:{z['ob_time']}",
                 timeframe=tf, layer="order_blocks", kind="zone",
-                name=f"{side.capitalize()} Order Block", color="bullish" if side == "bullish" else "bearish",
-                status="active" if zone.get("fresh") else "mitigated",
-                price_low=low, price_high=high,
-                time_start=_iso(base.get("time_utc")),
-                source="ai.desk.detect_fvg_order_blocks",
-                meta={"fresh": zone.get("fresh"), "distance_atr": zone.get("distance_atr"), "key": True},
+                name=f"{side.capitalize()} Order Block", color=side, status=ZONE_STATUS[z["state"]],
+                price_low=z["low"], price_high=z["high"],
+                time_start=_iso(z["ob_time"]), time_end=_iso(z.get("end_time")),
+                source=f"{SMC_SOURCE} order block ({z['break_kind']}-validated)",
+                meta={
+                    "key": True, "state": z["state"], "fresh": z["state"] == "fresh",
+                    "definition": z["definition"], "break_kind": z["break_kind"],
+                    "break_time": _iso(z["break_time"]), "broken_level": z["broken_level"],
+                    "displacement_time": _iso(z["displacement_time"]),
+                    "distance_atr": self._distance_atr(z["low"], z["high"], atr),
+                },
             )
 
     # ---------------------------------------------------------------- liquidity
     def liquidity(self, tf: str, data: dict[str, Any]) -> None:
-        swings = [s for s in data.get("swings") or [] if _num(s.get("price")) is not None]
-        candles = data.get("candles") or []
-        price = self.price
-
-        for swing_type, name in (("swing_high", "Buy-side Liquidity (BSL)"), ("swing_low", "Sell-side Liquidity (SSL)")):
-            last = next((s for s in reversed(swings) if s["type"] == swing_type), None)
-            if last is None:
-                continue
-            resting = price is None or (last["price"] > price if swing_type == "swing_high" else last["price"] < price)
+        liq = self.smc(tf, data)["liquidity"]
+        for pool in liq["pools"]:
+            bsl = pool["side"] == "BSL"
             self.add(
-                id=f"liq:{'bsl' if swing_type == 'swing_high' else 'ssl'}:{last.get('time_utc')}",
+                id=f"liq:{'bsl' if bsl else 'ssl'}:{pool['swing_time']}",
                 timeframe=tf, layer="liquidity", kind="hline",
-                name=name, color="info", status="active" if resting else "taken",
-                price=last["price"], time_start=_iso(last.get("time_utc")),
-                source="ai.desk.detect_sweep (last swing high/low)",
+                name="Buy-side Liquidity (BSL)" if bsl else "Sell-side Liquidity (SSL)",
+                color="info", status="active" if pool["state"] == "resting" else "taken",
+                price=pool["price"], time_start=_iso(pool["swing_time"]),
+                source=f"{SMC_SOURCE} liquidity (unswept swing {'high' if bsl else 'low'})",
+                meta={"swing_label": pool.get("swing_label"), "state": pool["state"]},
             )
-
-        for swing_type, name in (("swing_high", "EQH"), ("swing_low", "EQL")):
-            same = [s for s in swings if s["type"] == swing_type]
-            for a, b in zip(same, same[1:]):
-                if abs(a["price"] - b["price"]) > _level_tolerance(a["price"]):
-                    continue
-                level = (a["price"] + b["price"]) / 2
-                taken = price is not None and (price > max(a["price"], b["price"]) if swing_type == "swing_high"
-                                               else price < min(a["price"], b["price"]))
-                self.add(
-                    id=f"liq:{name.lower()}:{b.get('time_utc')}",
-                    timeframe=tf, layer="liquidity", kind="trendline",
-                    name=f"{name} ({'buy' if swing_type == 'swing_high' else 'sell'}-side liquidity)",
-                    color="info", status="taken" if taken else "active",
-                    points=[{"time": _iso(a.get("time_utc")), "price": a["price"]},
-                            {"time": _iso(b.get("time_utc")), "price": b["price"]}],
-                    price=level,
-                    source="derived: engine swings within key-level clustering tolerance",
-                )
-
-        if candles:
-            sweep = detect_sweep(candles[-1], swings)
-            if sweep:
-                bsl = sweep.startswith("BSL")
-                last = candles[-1]
-                self.add(
-                    id=f"sweep:{'bsl' if bsl else 'ssl'}:{last.get('time_utc')}",
-                    timeframe=tf, layer="liquidity", kind="marker",
-                    name="BSL sweep" if bsl else "SSL sweep",
-                    color="bearish" if bsl else "bullish", status="confirmed",
-                    price=last["high"] if bsl else last["low"], time_start=_iso(last.get("time_utc")),
-                    position="above" if bsl else "below", shape="circle",
-                    source="ai.desk.detect_sweep", meta={"verdict": sweep, "key": True},
-                )
+        for eq in liq["equal_levels"]:
+            high_side = eq["kind"] == "EQH"
+            self.add(
+                id=f"liq:{eq['kind'].lower()}:{eq['points'][1]['time']}",
+                timeframe=tf, layer="liquidity", kind="trendline",
+                name=f"{eq['kind']} ({'buy' if high_side else 'sell'}-side liquidity)",
+                color="info", status="active" if eq["state"] == "resting" else "taken",
+                points=[{"time": _iso(pt["time"]), "price": pt["price"]} for pt in eq["points"]],
+                price=eq["price"],
+                source=f"{SMC_SOURCE} equal swings (ATR tolerance)",
+                meta={"tolerance": eq["tolerance"], "state": eq["state"], "taken_time": _iso(eq.get("taken_time"))},
+            )
+        for sw in liq["sweeps"]:
+            bsl = sw["side"] == "BSL"
+            self.add(
+                id=f"sweep:{'bsl' if bsl else 'ssl'}:{sw['sweep_time']}",
+                timeframe=tf, layer="liquidity", kind="marker",
+                name="BSL sweep" if bsl else "SSL sweep",
+                color="bearish" if bsl else "bullish", status="confirmed",
+                price=sw["extreme"], time_start=_iso(sw["sweep_time"]),
+                position="above" if bsl else "below", shape="circle",
+                source=f"{SMC_SOURCE} sweep (wick beyond, close back inside)",
+                meta={
+                    "key": True, "level": sw["level"], "swing_time": _iso(sw["swing_time"]),
+                    "levels": sw.get("levels") or [sw["level"]], "close": sw["close"],
+                    "verdict": f"{sw['side']} sweep of {sw.get('swing_label') or 'swing'} {sw['level']}: "
+                               f"wick {sw['extreme']}, closed back at {sw['close']}",
+                },
+            )
 
     # ---------------------------------------------------------------- trendline
     def trendlines(self, tf: str, data: dict[str, Any]) -> None:
-        swings = [s for s in data.get("swings") or [] if _num(s.get("price")) is not None]
+        smc = self.smc(tf, data)
+        swings = smc["swings"]
         candles = data.get("candles") or []
-        last = candles[-1] if candles else None
+        last_time = candles[-1].get("time_utc") if candles else smc.get("last_closed_time")
+        last_close = _num(candles[-1].get("close")) if candles else None
 
         for swing_type, side in (("swing_low", "bullish"), ("swing_high", "bearish")):
             pts = [s for s in swings if s["type"] == swing_type][-2:]
@@ -284,55 +229,49 @@ class _Builder:
             a, b = pts
             if (side == "bullish" and b["price"] <= a["price"]) or (side == "bearish" and b["price"] >= a["price"]):
                 continue
-            ta, tb = _parse_time(a.get("time_utc")), _parse_time(b.get("time_utc"))
+            ta, tb = _parse_time(a["time"]), _parse_time(b["time"])
             if not ta or not tb or tb <= ta:
                 continue
 
             status = "active"
-            tl = _parse_time(last.get("time_utc")) if last else None
-            if last and tl and tl > tb:
+            tl = _parse_time(last_time)
+            if tl and tl > tb and last_close is not None:
                 slope = (b["price"] - a["price"]) / (tb - ta).total_seconds()
                 projected = b["price"] + slope * (tl - tb).total_seconds()
-                close = _num(last.get("close"))
-                if close is not None and ((side == "bullish" and close < projected) or (side == "bearish" and close > projected)):
+                if (side == "bullish" and last_close < projected) or (side == "bearish" and last_close > projected):
                     status = "broken"
 
             self.add(
-                id=f"trend:{side}:{a.get('time_utc')}",
+                id=f"trend:{side}:{a['time']}",
                 timeframe=tf, layer="trendline", kind="trendline",
                 name=f"{side.capitalize()} trendline", color=side, status=status,
                 points=[{"time": ta.isoformat(), "price": a["price"]}, {"time": tb.isoformat(), "price": b["price"]}],
                 extend=True,
-                source="derived: last two engine swings (HL for bullish, LH for bearish)",
+                source="derived: last two confirmed swings (HL for bullish, LH for bearish)",
             )
 
     # ---------------------------------------------------------------- premium / discount
     def premium_discount(self, tf: str, data: dict[str, Any]) -> None:
-        swings = data.get("swings") or []
-        pd = premium_discount(swings, self.price)
-        if not pd or pd["state"] == "outside_range":
-            return  # desk: price left the swing range, no P/D read
-        # The range is the last swing high + last swing low (desk definition).
-        anchors = [
-            next((s for s in reversed(swings) if s.get("type") == kind and _num(s.get("price")) is not None), None)
-            for kind in ("swing_high", "swing_low")
-        ]
-        hi = _exact(pd["range"][1], _num(anchors[0]["price"])) if anchors[0] else None
-        lo = _exact(pd["range"][0], _num(anchors[1]["price"])) if anchors[1] else None
-        if hi is None or lo is None:
-            logger.warning("CHART_OVERLAY premium/discount range mismatch tf=%s", tf)
-            return
-        span = hi - lo
-        times = [_parse_time(s.get("time_utc")) for s in anchors if s]
-        start = min((t for t in times if t), default=None)
-        common = dict(timeframe=tf, layer="premium_discount", source="ai.desk.premium_discount",
-                      time_start=start.isoformat() if start else None, meta={"state": pd["state"], "pos": pd["pos"]})
+        dr = self.smc(tf, data).get("dealing_range")
+        if not dr or dr.get("state") in (None, "outside_range"):
+            return  # price left the dealing range: no premium/discount read
+        times = [t for t in (_parse_time(dr["high_time"]), _parse_time(dr["low_time"])) if t]
+        start = min(times) if times else None
+        common = dict(
+            timeframe=tf, layer="premium_discount", source=f"{SMC_SOURCE} dealing range (last swing high/low)",
+            time_start=start.isoformat() if start else None,
+            meta={
+                "state": dr["state"], "pos": round(dr["position"], 2),
+                "range_high": dr["high"], "range_high_time": _iso(dr["high_time"]),
+                "range_low": dr["low"], "range_low_time": _iso(dr["low_time"]),
+            },
+        )
         self.add(id="pd:premium", kind="zone", name="Premium", color="bearish",
-                 price_low=lo + 0.55 * span, price_high=hi, **common)
+                 price_low=dr["premium_from"], price_high=dr["high"], **common)
         self.add(id="pd:discount", kind="zone", name="Discount", color="bullish",
-                 price_low=lo, price_high=lo + 0.45 * span, **common)
+                 price_low=dr["low"], price_high=dr["discount_to"], **common)
         self.add(id="pd:eq", kind="hline", name="Equilibrium", color="neutral",
-                 price=(lo + hi) / 2, **common)
+                 price=dr["equilibrium"], **common)
 
     # ---------------------------------------------------------------- S/R
     def support_resistance(self) -> None:

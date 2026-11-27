@@ -45,6 +45,31 @@ def by(payload, layer=None, tf=None):
             if (layer is None or o["layer"] == layer) and (tf is None or o["timeframe"] == tf)]
 
 
+def zigzag(anchors, steps=4, d=0.2, wick=0.05, minutes=5):
+    """Candles through turning points; a peak candle's HIGH (trough candle's
+    LOW) is exactly the anchor, so detected swing prices are known."""
+    rows, prev = [], anchors[0]
+    for i in range(1, len(anchors)):
+        last = i == len(anchors) - 1
+        peak = not last and anchors[i] > anchors[i - 1]
+        target = anchors[i] if last else (anchors[i] - d if peak else anchors[i] + d)
+        start = prev
+        for k in range(1, steps + 1):
+            c = start + (target - start) * k / steps
+            o = prev
+            h, lo = max(o, c) + wick, min(o, c) - wick
+            if k == steps and not last:
+                h, lo = (anchors[i], lo) if peak else (h, anchors[i])
+            rows.append((round(o, 6), round(h, 6), round(lo, 6), round(c, 6)))
+            prev = c
+    return [{"time_utc": (T0 + timedelta(minutes=minutes * i)).isoformat(), "open": o, "high": h, "low": lo,
+             "close": c, "tick_volume": 1} for i, (o, h, lo, c) in enumerate(rows)]
+
+
+# Down (two bearish BOS), CHoCH up through the last lower high, then a bullish BOS.
+STRUCTURE = [110, 106, 108, 103, 105, 100, 109, 106, 112]
+
+
 BULL_FVG = [
     (100.0, 100.5, 99.5, 100.2),
     (100.2, 100.8, 100.0, 100.6),
@@ -63,11 +88,12 @@ def test_bullish_fvg_fresh_with_exact_candle_times():
     assert z["name"] == "Bullish FVG" and z["color"] == "bullish" and z["status"] == "active"
     assert (z["price_low"], z["price_high"]) == (101.0, 102.2)
     assert z["time_start"] == t(2) and z["id"] == f"TESTm:M5:fvg:bullish:{t(4)}"
-    assert z["source"] == "ai.desk.detect_fvg_order_blocks"
+    assert z["meta"]["formed_time"] == t(4) and z["meta"]["state"] == "fresh"
+    assert z["source"].startswith("technical.smc")
 
 
 def test_fx_precision_is_kept_exact():
-    # 5-digit FX: desk rounds to 3 decimals (1.091/1.091); the chart must keep the real gap.
+    # 5-digit FX: the old desk rounding (3 decimals) collapsed this gap; prices must stay exact.
     rows = [
         (1.09000, 1.09020, 1.08990, 1.09010),
         (1.09010, 1.09030, 1.09000, 1.09020),
@@ -77,25 +103,31 @@ def test_fx_precision_is_kept_exact():
         (1.09125, 1.09140, 1.09110, 1.09130),
     ]
     p = build_chart_overlays(ctx({"M5": {"candles": candles(rows), "atr14": 0.0003, "swings": []}}, price=1.0913))
-    fvg = by(p, "fvg", "M5")
-    assert [(z["price_low"], z["price_high"]) for z in fvg] == [(1.09055, 1.09098)], fvg
+    zones = [(z["price_low"], z["price_high"]) for z in by(p, "fvg", "M5")]
+    assert (1.09055, 1.09098) in zones, zones
+    # every zone is a real 3-candle gap of the fixture (here also 1.09030..1.09050)
+    assert zones == [(1.0903, 1.0905), (1.09055, 1.09098)], zones
 
-    sw = [swing(1, "swing_low", 1.09012), swing(3, "swing_high", 1.09188)]
-    pd = {o["name"]: o for o in by(build_chart_overlays(ctx({"M5": {"candles": [], "swings": sw}}, price=1.0915)), "premium_discount")}
+    path = zigzag([1.0910, 1.09012, 1.09188, 1.0915], d=0.00004, wick=0.00001)
+    pd = {o["name"]: o for o in by(build_chart_overlays(ctx({"M5": {"candles": path}}, price=1.0915)), "premium_discount")}
     assert pd["Equilibrium"]["price"] == (1.09012 + 1.09188) / 2 and pd["Discount"]["price_low"] == 1.09012
 
 
 def test_fvg_mitigated_when_later_candle_trades_into_it():
+    # Entering the gap is a partial fill (still live); reaching the far edge mitigates it.
     rows = BULL_FVG + [(103.5, 103.6, 101.5, 102.0)]
-    p = build_chart_overlays(ctx({"M5": {"candles": candles(rows), "atr14": 1.0, "swings": []}}, price=102.0))
-    assert by(p, "fvg")[0]["status"] == "mitigated"
+    z = by(build_chart_overlays(ctx({"M5": {"candles": candles(rows)}}, price=102.0)), "fvg")[0]
+    assert z["status"] == "active" and z["meta"]["state"] == "partial" and z["meta"]["fill_pct"] == 58.3, z
+    rows = rows + [(102.0, 102.1, 100.9, 101.2)]
+    z = by(build_chart_overlays(ctx({"M5": {"candles": candles(rows)}}, price=101.2)), "fvg")[0]
+    assert z["status"] == "mitigated" and z["time_end"] == t(7), z
 
 
 def test_bearish_fvg_and_bearish_order_block():
     rows = [
         (100.0, 100.4, 99.6, 100.1),
         (100.1, 100.5, 99.9, 100.2),
-        (100.2, 100.6, 100.0, 100.4),   # bullish base candle, low 100.0
+        (100.2, 100.6, 100.0, 100.4),   # bullish candle, low 100.0
         (100.4, 100.4, 97.5, 97.6),     # bearish displacement
         (97.6, 99.0, 97.0, 97.2),       # high 99.0 < 100.0 -> bearish FVG 99.0..100.0
         (97.2, 97.8, 96.8, 97.0),
@@ -103,24 +135,26 @@ def test_bearish_fvg_and_bearish_order_block():
     p = build_chart_overlays(ctx({"M15": {"candles": candles(rows), "atr14": 1.0, "swings": []}}, price=97.0))
     fvg = by(p, "fvg", "M15")
     assert [(z["name"], z["price_low"], z["price_high"]) for z in fvg] == [("Bearish FVG", 99.0, 100.0)], fvg
-    ob = by(p, "order_blocks", "M15")
-    assert ob and ob[0]["name"] == "Bearish Order Block" and (ob[0]["price_low"], ob[0]["price_high"]) == (100.0, 100.6)
-    assert ob[0]["time_start"] == t(2)
+    # No swing is broken in these 6 candles: an opposing candle before a big
+    # candle is NOT an order block without a BOS/CHoCH (technical/smc.py).
+    assert by(p, "order_blocks", "M15") == []
+
+    p = build_chart_overlays(ctx({"M15": {"candles": zigzag(STRUCTURE)}}, price=112.0))
+    ob = {o["color"]: o for o in by(p, "order_blocks", "M15") if o["meta"]["break_kind"] == "BOS"}
+    bear = ob["bearish"]
+    assert bear["name"] == "Bearish Order Block" and bear["meta"]["definition"] == "full_candle_range"
+    assert bear["meta"]["break_time"] and bear["meta"]["broken_level"] in (106, 103)
 
 
 def test_swings_and_bos_vs_choch():
-    sw = [swing(1, "swing_low", 99.0, "HL"), swing(3, "swing_high", 101.0, "HH")]
-    rows = [(100, 100.5, 99.5, 100.2)] * 5 + [(100.5, 101.8, 100.4, 101.5)]
-    bos = build_chart_overlays(ctx({"M5": {"candles": candles(rows), "swings": sw, "trend": "bullish"}}, price=101.5))
-    markers = [o for o in by(bos, "structure") if o["kind"] == "marker"]
-    assert {(m["name"], m["color"]) for m in markers} == {("HL", "bullish"), ("HH", "bullish")}
-    brk = [o for o in by(bos, "structure") if o["kind"] == "hline"]
-    assert len(brk) == 1 and brk[0]["name"] == "BOS ↑" and brk[0]["status"] == "confirmed" and brk[0]["price"] == 101.0
-    assert brk[0]["time_start"] == t(3) and brk[0]["time_end"] == t(5)
-
-    choch = build_chart_overlays(ctx({"M5": {"candles": candles(rows), "swings": sw, "trend": "bearish"}}, price=101.5))
-    brk = [o for o in by(choch, "structure") if o["kind"] == "hline"]
-    assert brk[0]["name"].startswith("CHoCH / MSS (candidate)") and brk[0]["status"] == "candidate"
+    p = build_chart_overlays(ctx({"M5": {"candles": zigzag(STRUCTURE)}}, price=112.0))
+    markers = [(o["name"], o["price"], o["color"]) for o in by(p, "structure") if o["kind"] == "marker"]
+    assert ("LH", 105, "bearish") in markers and ("HH", 109, "bullish") in markers and ("HL", 106, "bullish") in markers, markers
+    brk = [(o["name"], o["price"], o["status"]) for o in by(p, "structure") if o["kind"] == "hline"]
+    assert brk == [("BOS ↓", 106, "confirmed"), ("BOS ↓", 103, "confirmed"),
+                   ("CHoCH ↑", 105, "confirmed"), ("BOS ↑", 109, "confirmed")], brk
+    choch = next(o for o in by(p, "structure") if o["name"] == "CHoCH ↑")
+    assert choch["time_start"] == t(15) and choch["time_end"] == t(22)
 
 
 def test_no_break_inside_range():
@@ -131,43 +165,43 @@ def test_no_break_inside_range():
 
 
 def test_liquidity_bsl_ssl_sweep_and_eqh():
-    sw = [swing(1, "swing_high", 101.0, None), swing(2, "swing_low", 99.0, None),
-          swing(3, "swing_high", 101.1, "HH"), swing(4, "swing_low", 98.0, "LL")]
-    rows = [(100, 100.5, 99.5, 100.2)] * 5 + [(100.5, 101.4, 100.3, 100.8)]  # wick above 101.1, close back below
-    p = build_chart_overlays(ctx({"M5": {"candles": candles(rows), "swings": sw, "trend": "mixed"}}, price=100.8))
+    rows = zigzag([100, 101.0, 99.0, 101.03, 98.0, 100.0])
+    rows.append({"time_utc": t(len(rows)), "open": 100.0, "high": 101.4, "low": 99.9, "close": 100.8, "tick_volume": 1})
+    p = build_chart_overlays(ctx({"M5": {"candles": rows}}, price=100.8))
     liq = {o["name"]: o for o in by(p, "liquidity")}
-    assert liq["Buy-side Liquidity (BSL)"]["price"] == 101.1 and liq["Buy-side Liquidity (BSL)"]["status"] == "active"
-    assert liq["Sell-side Liquidity (SSL)"]["price"] == 98.0
-    assert liq["BSL sweep"]["price"] == 101.4 and liq["BSL sweep"]["shape"] == "circle"
+    assert "Buy-side Liquidity (BSL)" not in liq  # the highs were swept: no resting BSL left
+    assert liq["Sell-side Liquidity (SSL)"]["price"] == 98.0 and liq["Sell-side Liquidity (SSL)"]["status"] == "active"
+    sweep = [o for o in by(p, "liquidity") if o["name"] == "BSL sweep"][-1]
+    assert sweep["price"] == 101.4 and sweep["shape"] == "circle" and sweep["meta"]["level"] == 101.03
+    assert sweep["time_start"] == t(len(rows) - 1)
     eqh = liq["EQH (buy-side liquidity)"]
-    assert eqh["kind"] == "trendline" and abs(eqh["price"] - 101.05) < 1e-9
-    assert "EQL (sell-side liquidity)" not in liq  # 99.0 vs 98.0 is beyond the 0.20 tolerance
+    assert eqh["kind"] == "trendline" and abs(eqh["price"] - 101.015) < 1e-9 and eqh["status"] == "taken"
+    assert "EQL (sell-side liquidity)" not in liq  # 99.0 vs 98.0 is far beyond 0.1 x ATR
 
 
 def test_trendline_active_and_broken():
-    sw = [swing(1, "swing_low", 99.0), swing(2, "swing_high", 101.0), swing(3, "swing_low", 99.5)]
-    # line rises 0.5 per 2 bars -> projected 100.5 at bar 7
-    up = [(100, 100.5, 99.5, 100.2)] * 7 + [(100.6, 101.0, 100.6, 100.9)]
-    p = build_chart_overlays(ctx({"M5": {"candles": candles(up), "swings": sw}}))
+    up = zigzag([100, 101.0, 99.0, 101.5, 99.5, 100.6])  # rising swing lows 99.0 -> 99.5
+    p = build_chart_overlays(ctx({"M5": {"candles": up}}))
     tl = by(p, "trendline")
-    assert len(tl) == 1 and tl[0]["name"] == "Bullish trendline" and tl[0]["status"] == "active"
+    assert len(tl) == 1 and tl[0]["name"] == "Bullish trendline" and tl[0]["status"] == "active", tl
     assert [pt["price"] for pt in tl[0]["points"]] == [99.0, 99.5]
 
-    down = up[:-1] + [(100.6, 100.6, 99.9, 100.0)]
-    p = build_chart_overlays(ctx({"M5": {"candles": candles(down), "swings": sw}}))
+    down = up + [{"time_utc": t(len(up)), "open": 100.6, "high": 100.6, "low": 99.2, "close": 99.3, "tick_volume": 1}]
+    p = build_chart_overlays(ctx({"M5": {"candles": down}}))
     assert by(p, "trendline")[0]["status"] == "broken"
 
 
 def test_premium_discount_and_outside_range():
-    sw = [swing(1, "swing_low", 98.0), swing(3, "swing_high", 102.0)]
-    p = build_chart_overlays(ctx({"H1": {"candles": [], "swings": sw}}, price=101.5))
+    path = zigzag([100, 98.0, 102.0, 101.5], minutes=60)  # swing low 98 (bar 3), swing high 102 (bar 7)
+    p = build_chart_overlays(ctx({"H1": {"candles": path}}, price=101.5))
     pd = {o["name"]: o for o in by(p, "premium_discount", "H1")}
     assert (pd["Premium"]["price_low"], pd["Premium"]["price_high"]) == (100.2, 102.0)
     assert (pd["Discount"]["price_low"], pd["Discount"]["price_high"]) == (98.0, 99.8)
     assert pd["Equilibrium"]["price"] == 100.0 and pd["Premium"]["meta"]["state"] == "premium"
-    assert pd["Premium"]["time_start"] == t(1)
+    start = (T0 + timedelta(hours=3)).isoformat()
+    assert pd["Premium"]["time_start"] == start and pd["Premium"]["meta"]["range_low_time"] == start
 
-    outside = build_chart_overlays(ctx({"H1": {"candles": [], "swings": sw}}, price=103.0))
+    outside = build_chart_overlays(ctx({"H1": {"candles": path}}, price=103.0))
     assert not by(outside, "premium_discount")
 
 
@@ -239,10 +273,11 @@ def test_overlay_ids_are_stable_across_rebuilds():
 def _chat_context():
     levels = {"resistances": [{"price": 101.0, "low": 100.9, "high": 101.1, "timeframes": ["M15"], "touches": 2}],
               "supports": [{"price": 99.0, "low": 98.9, "high": 99.1, "timeframes": ["M15"], "touches": 2}]}
-    sw = [swing(1, "swing_high", 101.2, "LH"), swing(2, "swing_low", 98.5, "LL")]
-    rows = [(100, 100.5, 99.5, 100.2)] * 6
+    # lower high 101.2, lower low 98.5, price back at 100.0; overlapping candles
+    # (wick > step) so the only supply above price is the key-level resistance
+    rows = zigzag([100.0, 102.5, 99.5, 101.2, 98.5, 100.0], d=0.5, wick=0.4, minutes=15)
     plan = {"status": "waiting", "scenario_name": "bearish_continuation", "direction": "sell"}
-    return ctx({"M15": {"candles": candles(rows), "swings": sw, "trend": "bearish"}},
+    return ctx({"M15": {"candles": rows, "trend": "bearish"}},
                price=100.0, key_levels=levels, trade_plan=plan, scenarios=SCENARIOS)
 
 

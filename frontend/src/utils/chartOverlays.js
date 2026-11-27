@@ -37,7 +37,7 @@ export const CATEGORIES = [
     { id: 'swing', label: 'First swing (unlabelled)' },
   ] },
   { id: 'events', label: 'Structure Events', types: [
-    { id: 'bos', label: 'BOS' }, { id: 'choch', label: 'CHoCH / MSS (candidate)' },
+    { id: 'bos', label: 'BOS' }, { id: 'choch', label: 'CHoCH' },
   ] },
   { id: 'imbalance', label: 'Imbalance', types: [{ id: 'fvg', label: 'FVG' }],
     unsupported: ['IFVG', 'BPR', 'Volume Imbalance'] },
@@ -550,7 +550,7 @@ function callout(symbol, tf, key, title, price, time, sources, extra = {}) {
 /**
  * Callout rules (documented, deterministic):
  * 1. Structure event: each BOS / CHoCH object -> "<dir> BOS confirmed" /
- *    "<dir> CHoCH candidate" at its break candle.
+ *    "<dir> CHoCH confirmed" at its break candle (engine: closed-candle break).
  * 2. Sweep: each BSL/SSL sweep marker -> "Buy/Sell-side liquidity swept".
  * 3. Proximity: fresh FVG / Order Block whose engine distance_atr <= 1.0 ->
  *    "Price inside/near <zone>" (distance from ai/desk.py, not recomputed).
@@ -568,7 +568,7 @@ export function buildDerived({ symbol, marketBias, scenarios, currentPrice, sele
     const dir = o.name.includes('↑') ? 'Bullish' : o.name.includes('↓') ? 'Bearish' : ''
     if (type === 'bos' || type === 'choch') {
       out.push(callout(symbol, o.timeframe, `event:${o.id}`,
-        type === 'bos' ? `${dir} BOS confirmed` : `${dir} CHoCH candidate`,
+        type === 'bos' ? `${dir} BOS confirmed` : `${dir} CHoCH confirmed`,
         o.price, o.time_end, [o.id],
         { color: o.color, priority: 2, rule: 'structure event', text: o.meta?.verdict || '' }))
     } else if (type === 'sweep') {

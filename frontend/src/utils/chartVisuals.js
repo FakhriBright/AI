@@ -232,11 +232,23 @@ export function layoutLabels(requests, { reserved = [], bounds, offsets = [0, -1
       if (spot) break
     }
     if (!spot && r.priority >= 3) {
-      // Never collapse a primary label: last resort, at its anchor clamped into view.
+      // Never collapse a primary label: last resort, at its anchor clamped into
+      // view, stepped vertically until it clears the labels already placed
+      // (it may cover candles, never another label).
       const left = r.align === 'right' ? r.x - r.w : r.align === 'center' ? r.x - r.w / 2 : r.x
       const l = bounds ? Math.min(Math.max(left, bounds.l), bounds.r - r.w) : left
       const b = bounds ? Math.min(Math.max(r.y, bounds.t + r.h), bounds.b) : r.y
-      spot = { l, r: l + r.w, t: b - r.h, b }
+      const labelRects = placed.map((p) => p.rect)
+      for (const step of [0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5]) {
+        const bb = b + step * (r.h + 1)
+        const rect = { l, r: l + r.w, t: bb - r.h, b: bb }
+        if (bounds && (rect.t < bounds.t || rect.b > bounds.b)) continue
+        if (!labelRects.some((q) => overlaps(rect, q))) {
+          spot = rect
+          break
+        }
+      }
+      if (!spot) spot = { l, r: l + r.w, t: b - r.h, b }
     }
     if (spot) {
       taken.push(spot)

@@ -92,10 +92,14 @@ async def build_analysis_snapshot(
             14,
         )[-1]
 
+        # Swings from CLOSED candles only: a fractal needs `lookback` closed
+        # candles on its right, so the forming bar must never confirm (and
+        # later un-confirm) a swing.
+        swing_source = closed_candles or analysis_candles
         swings = find_swings(
-            highs=highs,
-            lows=lows,
-            times=times,
+            highs=[c.high for c in swing_source],
+            lows=[c.low for c in swing_source],
+            times=[c.time_utc for c in swing_source],
             lookback=3,
         )
 

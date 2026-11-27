@@ -64,16 +64,6 @@ async def _run_symbol_test(provider, symbol):
         if result.entry_price is None:
             continue
 
-        atr_reference = (
-            context.timeframes["M5"].atr14
-            or context.timeframes["M15"].atr14
-        )
-
-        from app.services.analysis.stop import (
-            StopRequest,
-            calculate_stop,
-        )
-
         from app.services.analysis.risk import (
             RiskRequest,
             calculate_risk,
@@ -82,15 +72,14 @@ async def _run_symbol_test(provider, symbol):
         if scenario.trigger_reference is None:
             continue
 
-        stop_plan = calculate_stop(
-            StopRequest(
-                direction=scenario.direction,
-                entry_price=result.entry_price,
-                trigger_reference=scenario.trigger_reference,
-                invalidation_reference=scenario.invalidation_reference,
-                atr_reference=atr_reference,
-            )
-        )
+        # Same stop rule as the live pipeline: no stop without a valid
+        # invalidation reference (returns the reason instead of raising).
+        from app.services.analysis.pipeline import _build_stop_plan
+
+        stop_plan, stop_error = _build_stop_plan(result, scenario)
+        if stop_plan is None:
+            print(f"NO STOP: {scenario.name}: {stop_error}")
+            continue
 
         info = await provider.symbol_info(symbol)
 
